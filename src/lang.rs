@@ -14,19 +14,18 @@ impl Translator {
         let (key, args) = input.to_key_and_args();
 
         let mut errors = Vec::with_capacity(0);
-        let out = match self.bundle.get_message(key) {
-            Some(msg) => self.bundle.format_pattern(
-                msg.value.expect("Missing value for translation key"),
+        let out = if let Some(msg) = self.bundle.get_message(key) {
+            self.bundle.format_pattern(
+                msg.value().expect("Missing value for translation key"),
                 args,
                 &mut errors,
-            ),
-            None => {
-                log::error!("Missing translation for {}", key);
-                Cow::Borrowed(key)
-            }
+            )
+        } else {
+            log::error!("Missing translation for {key}");
+            Cow::Borrowed(key)
         };
         if !errors.is_empty() {
-            log::error!("Errors in translation: {:?}", errors);
+            log::error!("Errors in translation: {errors:?}");
         }
 
         out
@@ -34,19 +33,19 @@ impl Translator {
 }
 
 pub trait ToKeyAndArgs {
-    fn to_key_and_args(&self) -> (&str, Option<&fluent::FluentArgs>);
+    fn to_key_and_args(&self) -> (&str, Option<&fluent::FluentArgs<'_>>);
 }
 
 pub struct PlainLangKey(&'static str);
 impl ToKeyAndArgs for PlainLangKey {
-    fn to_key_and_args(&self) -> (&str, Option<&fluent::FluentArgs>) {
+    fn to_key_and_args(&self) -> (&str, Option<&fluent::FluentArgs<'_>>) {
         (self.0, None)
     }
 }
 
 pub struct LangKeyWithArgs<'a>(&'static str, fluent::FluentArgs<'a>);
-impl<'a> ToKeyAndArgs for LangKeyWithArgs<'a> {
-    fn to_key_and_args(&self) -> (&str, Option<&fluent::FluentArgs>) {
+impl ToKeyAndArgs for LangKeyWithArgs<'_> {
+    fn to_key_and_args(&self) -> (&str, Option<&fluent::FluentArgs<'_>>) {
         (self.0, Some(&self.1))
     }
 }

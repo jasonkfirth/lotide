@@ -1,3 +1,4 @@
+use crate::hyper;
 use crate::types::{CommunityLocalID, PollLocalID, PollOptionLocalID, PostLocalID, UserLocalID};
 use activitystreams::prelude::*;
 use std::borrow::Cow;
@@ -19,10 +20,12 @@ pub fn route_posts() -> crate::RouteNode<()> {
             )
             .with_child(
                 "likes",
-                crate::RouteNode::new().with_child_parse::<UserLocalID, _>(
-                    crate::RouteNode::new()
-                        .with_handler_async(hyper::Method::GET, handler_posts_likes_get),
-                ),
+                crate::RouteNode::new()
+                    .with_handler_async(hyper::Method::GET, handler_posts_likes_list)
+                    .with_child_parse::<UserLocalID, _>(
+                        crate::RouteNode::new()
+                            .with_handler_async(hyper::Method::GET, handler_posts_likes_get),
+                    ),
             ),
     )
 }
@@ -66,7 +69,7 @@ async fn handler_posts_get(
                 let mut body = activitystreams::object::Tombstone::new();
                 body
                     .set_former_type(
-                        (if poll_id.is_some() { "Question" } else { if had_href == Some(true) { "Page" } else { "Note" } }).to_owned()
+                        (if poll_id.is_some() { "Question" } else if had_href == Some(true) { "Page" } else { "Note" }).to_owned()
                     )
                     .set_context(activitystreams::context())
                     .set_id(crate::apub_util::LocalObjectRef::Post(post_id).to_local_uri(&ctx.host_url_apub).into());
@@ -130,7 +133,7 @@ async fn handler_posts_get(
                             crate::PollOption {
                                 id: PollOptionLocalID(id),
                                 name,
-                                votes: votes as u32,
+                                votes: crate::i64_to_u32_saturating(votes),
                             }
                         })
                         .collect();
@@ -264,7 +267,7 @@ async fn handler_posts_create_get(
                             crate::PollOption {
                                 id: PollOptionLocalID(id),
                                 name,
-                                votes: votes as u32,
+                                votes: crate::i64_to_u32_saturating(votes),
                             }
                         })
                         .collect();
@@ -367,6 +370,55 @@ async fn handler_posts_delete_get(
     }
 }
 
+async fn handler_posts_likes_list(
+    params: (PostLocalID,),
+    ctx: Arc<crate::RouteContext>,
+    _req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (post_id,) = params;
+
+    let db = ctx.db_pool.get().await?;
+
+    let row = db
+        .query_opt(
+            "SELECT local, deleted, (SELECT COUNT(*) FROM post_like WHERE post=$1) FROM post WHERE id=$1",
+            &[&post_id.raw()],
+        )
+        .await?;
+
+    match row {
+        None => Ok(crate::simple_response(
+            hyper::StatusCode::NOT_FOUND,
+            "No such post",
+        )),
+        Some(row) => {
+            let local: bool = row.get(0);
+            if !local {
+                return Err(crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::BAD_REQUEST,
+                    "Requested post is not owned by this instance",
+                )));
+            }
+
+            let deleted: bool = row.get(1);
+            if deleted {
+                return Err(crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::GONE,
+                    "Post has been deleted",
+                )));
+            }
+
+            let count: i64 = row.get(2);
+
+            super::activitypub_collection_summary_response(
+                crate::apub_util::LocalObjectRef::PostLikes(post_id)
+                    .to_local_uri(&ctx.host_url_apub),
+                count,
+            )
+        }
+    }
+}
+
 async fn handler_posts_likes_get(
     params: (PostLocalID, UserLocalID),
     ctx: Arc<crate::RouteContext>,
@@ -378,17 +430,21 @@ async fn handler_posts_likes_get(
 
     let like_row = db
         .query_opt(
-            "SELECT local FROM post_like WHERE post=$1 AND person=$2",
+            "SELECT local, ap_id FROM post_like WHERE post=$1 AND person=$2",
             &[&post_id.raw(), &user_id],
         )
         .await?;
     if let Some(like_row) = like_row {
         let local = like_row.get(0);
+        let like_ap_id = like_row
+            .get::<_, Option<&str>>(1)
+            .map(str::parse)
+            .transpose()?;
 
         if local {
             let row = db
                 .query_one(
-                    "SELECT post.local, post.ap_id, person.local, person.id, person.ap_id FROM post INNER JOIN person ON (person.id = post.author) WHERE post.id=$1",
+                    "SELECT post.local, post.ap_id, person.local, person.id, person.ap_id, community.id, community.local, community.ap_id FROM post INNER JOIN person ON (person.id = post.author) LEFT OUTER JOIN community ON (community.id = post.community) WHERE post.id=$1",
                     &[&post_id.raw()],
                 )
                 .await?;
@@ -406,15 +462,25 @@ async fn handler_posts_likes_get(
                         .into(),
                 )
             } else {
-                row.get::<_, Option<&str>>(4)
-                    .map(|x| x.parse())
-                    .transpose()?
+                row.get::<_, Option<&str>>(4).map(str::parse).transpose()?
+            };
+
+            let community_ap_id = match row.get(6) {
+                Some(true) => Some(
+                    crate::apub_util::LocalObjectRef::Community(CommunityLocalID(row.get(5)))
+                        .to_local_uri(&ctx.host_url_apub)
+                        .into(),
+                ),
+                Some(false) => row.get::<_, Option<&str>>(7).map(str::parse).transpose()?,
+                None => None,
             };
 
             let like = crate::apub_util::local_post_like_to_ap(
                 post_id,
                 post_ap_id,
+                like_ap_id,
                 author_ap_id,
+                community_ap_id,
                 user_id,
                 &ctx.host_url_apub,
             )?;

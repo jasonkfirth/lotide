@@ -1,3 +1,4 @@
+use crate::hyper;
 use crate::types::{
     ActorLocalRef, CommunityLocalID, FingerLink, FingerRequestQuery, FingerResponse, UserLocalID,
 };
@@ -17,7 +18,7 @@ pub fn route_well_known() -> crate::RouteNode<()> {
 }
 
 async fn handler_nodeinfo_get(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     _req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
@@ -37,7 +38,7 @@ async fn handler_nodeinfo_get(
 }
 
 async fn handler_webfinger_get(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
@@ -51,7 +52,7 @@ async fn handler_webfinger_get(
     }
 
     let found_ref = if let Some(local_id) =
-        query.resource.parse().ok().and_then(|url| {
+        query.resource.parse::<url::Url>().ok().and_then(|url| {
             crate::apub_util::LocalObjectRef::try_from_uri(&url, &ctx.host_url_apub)
         }) {
         match local_id {

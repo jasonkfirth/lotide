@@ -1,9 +1,37 @@
+use crate::hyper;
 use crate::lang;
-use futures::TryStreamExt;
+use futures::stream;
 use std::sync::Arc;
 
+const MEDIA_UPLOAD_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+fn media_upload_content_type_is_allowed(content_type: &mime::Mime) -> bool {
+    /*
+        Browsers treat SVG as an image, but it is also active XML content. Lotide
+        serves uploaded media from its own origin, so accepting SVG would give a
+        hostile upload too much room to interact with the site context.
+    */
+    content_type.type_() == mime::IMAGE && content_type.essence_str() != "image/svg+xml"
+}
+
+async fn read_media_upload_body(body: hyper::Body) -> Result<bytes::Bytes, crate::Error> {
+    match crate::read_body_limited(body, MEDIA_UPLOAD_MAX_BYTES).await {
+        Ok(body) => Ok(body),
+        Err(crate::Error::InternalStr(message)) if message.starts_with("HTTP body exceeded") => {
+            Err(crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "Media upload cannot exceed {} MiB",
+                    MEDIA_UPLOAD_MAX_BYTES / 1024 / 1024
+                ),
+            )))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 async fn route_unstable_media_create(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
@@ -21,10 +49,14 @@ async fn route_unstable_media_create(
     let content_type = std::str::from_utf8(content_type.as_ref())?;
     let content_type: mime::Mime = content_type.parse()?;
 
-    if content_type.type_() != mime::IMAGE {
+    if !media_upload_content_type_is_allowed(&content_type) {
         return Err(crate::Error::UserError(crate::simple_response(
             hyper::StatusCode::BAD_REQUEST,
-            lang.tr(&lang::media_upload_not_image()).into_owned(),
+            if content_type.essence_str() == "image/svg+xml" {
+                "SVG uploads are not allowed".to_owned()
+            } else {
+                lang.tr(&lang::media_upload_not_image()).into_owned()
+            },
         )));
     }
 
@@ -33,10 +65,17 @@ async fn route_unstable_media_create(
     let user = crate::require_login(&req, &db).await?;
 
     if let Some(media_storage) = &ctx.media_storage {
+        let media = read_media_upload_body(req.into_body()).await?;
+        if media.is_empty() {
+            return Err(crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::BAD_REQUEST,
+                "Media upload cannot be empty",
+            )));
+        }
+
         let path = media_storage
             .save(
-                req.into_body()
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err)),
+                stream::once(async move { Ok::<_, std::io::Error>(media) }),
                 content_type.as_ref(),
             )
             .await?;
@@ -60,4 +99,20 @@ async fn route_unstable_media_create(
 
 pub fn route_media() -> crate::RouteNode<()> {
     crate::RouteNode::new().with_handler_async(hyper::Method::POST, route_unstable_media_create)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn media_upload_policy_allows_raster_images_and_rejects_svg() {
+        let png: mime::Mime = "image/png".parse().unwrap();
+        let webp: mime::Mime = "image/webp".parse().unwrap();
+        let svg: mime::Mime = "image/svg+xml".parse().unwrap();
+        let html: mime::Mime = "text/html".parse().unwrap();
+
+        assert!(super::media_upload_content_type_is_allowed(&png));
+        assert!(super::media_upload_content_type_is_allowed(&webp));
+        assert!(!super::media_upload_content_type_is_allowed(&svg));
+        assert!(!super::media_upload_content_type_is_allowed(&html));
+    }
 }

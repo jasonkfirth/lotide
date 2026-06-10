@@ -1,0 +1,3 @@
+DROP INDEX actor_target_profile_updated_idx;
+DROP INDEX actor_target_profile_target_idx;
+DROP TABLE actor_target_profile;

@@ -1,3 +1,27 @@
+/*
+    Project: Lotide Server
+    ----------------------
+
+    File: migrate.rs
+
+    Purpose:
+
+        Wire the compiled-in SQL migrations into migrant_lib and apply or
+        roll them back from the Lotide command line.
+
+    Responsibilities:
+
+        - translate DATABASE_URL into migrant_lib connection settings
+        - register embedded up/down migrations in stable tag order
+        - apply migration actions requested by the command-line interface
+
+    This file intentionally does NOT contain:
+
+        - application startup
+        - runtime database pooling
+        - migration SQL generation
+*/
+
 pub const MIGRATIONS: &[StaticMigration] = include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
 
 pub struct StaticMigration {
@@ -6,8 +30,22 @@ pub struct StaticMigration {
     pub down: &'static str,
 }
 
-pub fn run(config: crate::Config, matches: &clap::ArgMatches) {
-    let action = matches.value_of("ACTION").unwrap_or("up");
+fn migration_sql(sql: &'static str) -> &'static str {
+    /*
+        Some old migrations were edited on Windows and can carry a UTF-8 byte
+        order mark. PostgreSQL treats that marker as part of the first token,
+        so the BOM has to be removed before the SQL reaches migrant_lib.
+    */
+    sql.strip_prefix('\u{feff}').unwrap_or(sql)
+}
+
+pub fn run(
+    config: crate::Config,
+    matches: &clap::ArgMatches,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let action = matches
+        .get_one::<String>("ACTION")
+        .map_or("up", std::string::String::as_str);
 
     let db_cfg: tokio_postgres::Config = config
         .database_url
@@ -30,17 +68,16 @@ pub fn run(config: crate::Config, matches: &clap::ArgMatches) {
     if !hosts.is_empty() {
         let host = hosts
             .iter()
-            .filter_map(|host| match host {
-                tokio_postgres::config::Host::Tcp(hostname) => Some(hostname),
-                _ => None,
-            })
-            .next();
+            .find(|host| matches!(host, tokio_postgres::config::Host::Tcp(_)));
 
         match host {
-            None => panic!("Unsupported host type"),
-            Some(hostname) => {
+            Some(tokio_postgres::config::Host::Tcp(hostname)) => {
                 settings.database_host(hostname);
             }
+            #[cfg(unix)]
+            Some(_) | None => return Err("Unsupported host type".into()),
+            #[cfg(not(unix))]
+            None => return Err("Unsupported host type".into()),
         }
     }
 
@@ -49,7 +86,7 @@ pub fn run(config: crate::Config, matches: &clap::ArgMatches) {
         if ports.len() == 1 {
             settings.database_port(ports[0]);
         } else {
-            panic!("Multiple ports are not supported");
+            return Err("Multiple ports are not supported".into());
         }
     }
 
@@ -65,8 +102,8 @@ pub fn run(config: crate::Config, matches: &clap::ArgMatches) {
             .iter()
             .map(|item| {
                 migrant_lib::EmbeddedMigration::with_tag(item.tag)
-                    .up(item.up)
-                    .down(item.down)
+                    .up(migration_sql(item.up))
+                    .down(migration_sql(item.down))
                     .boxed()
             })
             .collect();
@@ -94,7 +131,26 @@ pub fn run(config: crate::Config, matches: &clap::ArgMatches) {
                     .apply()
                     .expect("Failed to undo migration");
             }
-            _ => panic!("Unknown migrate action"),
+            _ => return Err("Unknown migrate action".into()),
         }
     }
+
+    Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn migration_sql_removes_utf8_bom() {
+        assert_eq!(
+            super::migration_sql("\u{feff}CREATE TABLE item ();"),
+            "CREATE TABLE item ();"
+        );
+        assert_eq!(
+            super::migration_sql("CREATE TABLE item ();"),
+            "CREATE TABLE item ();"
+        );
+    }
+}
+
+/* end of migrate.rs */

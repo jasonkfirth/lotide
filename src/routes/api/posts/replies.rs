@@ -1,3 +1,5 @@
+use crate::hyper;
+use crate::lang;
 use crate::types::{
     CommentLocalID, ImageHandling, JustURL, PostLocalID, RespAvatarInfo, RespList,
     RespMinimalAuthorInfo, RespMinimalCommentInfo, RespPostCommentInfo, UserLocalID,
@@ -70,7 +72,7 @@ async fn route_unstable_posts_replies_create(
 
     let user = crate::require_login(&req, &db).await?;
 
-    let body = hyper::body::to_bytes(req.into_body()).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
 
     #[derive(Deserialize)]
     struct RepliesCreateBody<'a> {
@@ -101,6 +103,26 @@ async fn route_unstable_posts_replies_create(
         .await?;
 
     let sensitive = body.sensitive.unwrap_or(false);
+    let community: i64 = db
+        .query_opt(
+            "SELECT community FROM post WHERE id=$1 AND NOT deleted",
+            &[&post_id],
+        )
+        .await?
+        .ok_or_else(|| {
+            crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::NOT_FOUND,
+                lang.tr(&lang::no_such_post()).into_owned(),
+            ))
+        })?
+        .get(0);
+    crate::routes::api::communities::require_community_interaction_allowed(
+        &db,
+        crate::CommunityLocalID(community),
+        user,
+        &lang,
+    )
+    .await?;
 
     let (reply_id, created) = {
         let trans = db.transaction().await?;
@@ -161,17 +183,17 @@ async fn get_post_comments<'a>(
 
     let limit_i = i64::from(limit) + 1;
 
-    let sql1 = "SELECT reply.id, reply.author, reply.content_text, reply.created, reply.content_html, person.username, person.local, person.ap_id, reply.deleted, person.avatar, attachment_href, reply.local, (SELECT COUNT(*) FROM reply_like WHERE reply = reply.id), reply.content_markdown, person.is_bot, reply.ap_id, reply.local, reply.sensitive";
+    let sql1 = "SELECT reply.id, reply.author, reply.content_text, reply.created, reply.content_html, person.username, person.local, person.ap_id, reply.deleted, person.avatar, attachment_href, reply.local, (SELECT COUNT(*) FROM reply_like WHERE reply = reply.id), reply.content_markdown, person.is_bot, reply.ap_id, reply.local, reply.sensitive, community.local, reply.federation_sent_at IS NOT NULL, reply.federation_received_at IS NOT NULL, reply.federation_posted_at IS NOT NULL";
     let (sql2, mut values): (_, Vec<&(dyn tokio_postgres::types::ToSql + Sync)>) =
         if include_your_for.is_some() {
             (
-                ", EXISTS(SELECT 1 FROM reply_like WHERE reply = reply.id AND person = $3)",
+                ", (SELECT reply_like.local FROM reply_like WHERE reply = reply.id AND person = $3), (SELECT reply_like.federation_posted_at IS NOT NULL FROM reply_like WHERE reply = reply.id AND person = $3), (SELECT reply_like.federation_sent_at IS NOT NULL FROM reply_like WHERE reply = reply.id AND person = $3), (SELECT reply_like.federation_received_at IS NOT NULL FROM reply_like WHERE reply = reply.id AND person = $3)",
                 vec![&post_id, &limit_i, &include_your_for],
             )
         } else {
             ("", vec![&post_id, &limit_i])
         };
-    let mut sql3 = " FROM reply LEFT OUTER JOIN person ON (person.id = reply.author) WHERE post=$1 AND parent IS NULL ".to_owned();
+    let mut sql3 = " FROM reply INNER JOIN post ON (post.id = reply.post) INNER JOIN community ON (community.id = post.community) LEFT OUTER JOIN person ON (person.id = reply.author) WHERE reply.post=$1 AND parent IS NULL AND NOT post.deleted AND NOT community.deleted ".to_owned();
     let mut sql4 = format!("ORDER BY {} LIMIT $2", sort.comment_sort_sql());
 
     let mut con1 = None;
@@ -202,7 +224,7 @@ async fn get_post_comments<'a>(
         sql4.push_str(&part);
     }
 
-    let sql: &str = &format!("{}{}{}{}", sql1, sql2, sql3, sql4);
+    let sql: &str = &format!("{sql1}{sql2}{sql3}{sql4}");
 
     let stream = crate::query_stream(db, sql, &values[..]).await?;
 
@@ -284,12 +306,23 @@ async fn get_post_comments<'a>(
                     replies: Some(RespList::empty()),
                     score: row.get(12),
                     your_vote: include_your_for.map(|_| {
-                        if row.get(18) {
-                            Some(crate::types::Empty {})
-                        } else {
-                            None
-                        }
+                        row.get::<_, Option<bool>>(22).map(|vote_local| {
+                            crate::routes::api::local_remote_vote_info(
+                                vote_local,
+                                row.get(18),
+                                row.get::<_, Option<bool>>(23).unwrap_or(false),
+                                row.get::<_, Option<bool>>(24).unwrap_or(false),
+                                row.get::<_, Option<bool>>(25).unwrap_or(false),
+                            )
+                        })
                     }),
+                    federation_status: crate::routes::api::local_remote_federation_status(
+                        local,
+                        row.get(18),
+                        row.get(21),
+                        row.get(19),
+                        row.get(20),
+                    ),
                 },
             ))
         })
@@ -315,7 +348,7 @@ async fn get_post_comments<'a>(
     .await?;
 
     Ok((
-        comments.into_iter().map(|(_, comment)| comment).collect(),
+        comments.into_iter().map(|((), comment)| comment).collect(),
         next_page,
     ))
 }

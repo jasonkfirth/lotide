@@ -1,13 +1,11 @@
 use serde_derive::Deserialize;
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::ops::Deref;
 
 pub const ACTIVITY_TYPE: &str =
     "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"";
 
 struct TestServer {
-    ap_host_url: String,
     real_host_url: String,
     process: std::process::Child,
 }
@@ -30,7 +28,6 @@ impl TestServer {
             .unwrap();
 
         let res = Self {
-            ap_host_url,
             real_host_url,
             process: child,
         };
@@ -71,48 +68,81 @@ impl FileServer {
         ))
         .unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = {
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+
+        tokio::spawn({
             let file_map = file_map.clone();
-            hyper::Server::from_tcp(listener)
-                .unwrap()
-                .serve(hyper::service::make_service_fn(move |_| {
-                    let file_map = file_map.clone();
-                    async move {
-                        Result::<_, std::convert::Infallible>::Ok(hyper::service::service_fn({
-                            let file_map = file_map.clone();
-                            move |req: hyper::Request<hyper::Body>| {
-                                let file_map = file_map.clone();
-                                async move {
-                                    let file_map = file_map.read().unwrap();
-                                    if let Some(info) = file_map.get(req.uri().path()) {
-                                        let mut res = hyper::Response::new(hyper::Body::from(
-                                            info.content.clone(),
-                                        ));
-                                        res.headers_mut().insert(
-                                            hyper::header::CONTENT_TYPE,
-                                            info.content_type.try_into().unwrap(),
-                                        );
+            async move {
+                let mut stop_rx = stop_rx;
 
-                                        Result::<_, std::convert::Infallible>::Ok(res)
-                                    } else {
-                                        let mut res =
-                                            hyper::Response::new(hyper::Body::from("not found"));
-                                        *res.status_mut() = hyper::StatusCode::NOT_FOUND;
-                                        Ok(res)
-                                    }
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_rx => break,
+                        accepted = listener.accept() => {
+                            let (stream, _) = match accepted {
+                                Ok(accepted) => accepted,
+                                Err(err) => {
+                                    eprintln!("Error occurred in test file server accept: {:?}", err);
+                                    break;
                                 }
-                            }
-                        }))
-                    }
-                }))
-        };
+                            };
 
-        tokio::spawn(async {
-            match futures::future::select(server, stop_rx).await {
-                futures::future::Either::Left((Err(err), _)) => {
-                    eprintln!("Error occurred in test file server: {:?}", err);
+                            let file_map = file_map.clone();
+
+                            tokio::spawn(async move {
+                                let io = hyper_util::rt::TokioIo::new(stream);
+                                let service = hyper1::service::service_fn(
+                                    move |req: hyper1::Request<hyper1::body::Incoming>| {
+                                        let file_map = file_map.clone();
+
+                                        async move {
+                                            let response = {
+                                                let file_map = file_map.read().unwrap();
+
+                                                if let Some(info) = file_map.get(req.uri().path()) {
+                                                    let mut res = hyper1::Response::new(
+                                                        http_body_util::Full::new(
+                                                            bytes::Bytes::from(info.content.clone()),
+                                                        ),
+                                                    );
+
+                                                    res.headers_mut().insert(
+                                                        hyper1::header::CONTENT_TYPE,
+                                                        hyper1::header::HeaderValue::from_static(
+                                                            info.content_type,
+                                                        ),
+                                                    );
+
+                                                    res
+                                                } else {
+                                                    let mut res = hyper1::Response::new(
+                                                        http_body_util::Full::new(
+                                                            bytes::Bytes::from_static(b"not found"),
+                                                        ),
+                                                    );
+                                                    *res.status_mut() = hyper1::StatusCode::NOT_FOUND;
+
+                                                    res
+                                                }
+                                            };
+
+                                            Result::<_, std::convert::Infallible>::Ok(response)
+                                        }
+                                    },
+                                );
+
+                                if let Err(err) =
+                                    hyper1::server::conn::http1::Builder::new()
+                                        .serve_connection(io, service)
+                                        .await
+                                {
+                                    eprintln!("Error occurred in test file server: {:?}", err);
+                                }
+                            });
+                        }
+                    }
                 }
-                _ => {}
             }
         });
 
@@ -142,14 +172,25 @@ impl std::ops::Drop for FileServer {
 }
 
 fn random_string() -> String {
-    use rand::distributions::Distribution;
+    use rand::distr::{Alphanumeric, SampleString};
 
-    rand::distributions::Alphanumeric
-        .sample_iter(rand::thread_rng())
-        .take(16)
-        .collect()
+    Alphanumeric.sample_string(&mut rand::rng(), 16)
 }
 
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct TestUserInfo {
+    id: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct TestCreateUserResponse {
+    user: TestUserInfo,
+    token: String,
+}
+
+#[allow(dead_code)]
 async fn create_account(client: &reqwest::Client, server: &TestServer) -> String {
     let resp = client
         .post(format!("{}/api/unstable/users", server.real_host_url).deref())
@@ -174,11 +215,32 @@ async fn create_account(client: &reqwest::Client, server: &TestServer) -> String
     resp.token
 }
 
+#[allow(dead_code)]
+async fn create_account_with_id(client: &reqwest::Client, server: &TestServer) -> (i64, String) {
+    let resp = client
+        .post(format!("{}/api/unstable/users", server.real_host_url).deref())
+        .json(&serde_json::json!({
+            "username": random_string(),
+            "password": random_string(),
+            "login": true
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let resp: TestCreateUserResponse = resp.json().await.unwrap();
+    (resp.user.id, resp.token)
+}
+
+#[allow(dead_code)]
 struct CommunityInfo {
     id: i64,
     name: String,
 }
 
+#[allow(dead_code)]
 async fn create_community(
     client: &reqwest::Client,
     server: &TestServer,
@@ -210,7 +272,7 @@ async fn lookup_community(client: &reqwest::Client, server: &TestServer, ap_id: 
             format!(
                 "{}/api/unstable/actors:lookup/{}",
                 server.real_host_url,
-                percent_encoding::utf8_percent_encode(&ap_id, percent_encoding::NON_ALPHANUMERIC)
+                percent_encoding::utf8_percent_encode(ap_id, percent_encoding::NON_ALPHANUMERIC)
             )
             .deref(),
         )
@@ -265,4 +327,137 @@ async fn community_fetch() {
 
     assert_eq!(resp["name"].as_str(), Some(name.as_ref()));
     assert_eq!(resp["local"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn user_follow_endpoints() {
+    let server = TestServer::start(1);
+    let client = reqwest::Client::builder().build().unwrap();
+
+    let (target_user, _target_token) = create_account_with_id(&client, &server).await;
+    let (follower_user, follower_token) = create_account_with_id(&client, &server).await;
+
+    let follow_response = client
+        .post(format!(
+            "{}/api/unstable/users/{}/follow",
+            server.real_host_url, target_user
+        ))
+        .bearer_auth(&follower_token)
+        .json(&serde_json::json!({
+            "try_wait_for_accept": true
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    assert_eq!(follow_response.status(), reqwest::StatusCode::OK);
+
+    let follow_body: serde_json::Value = follow_response.json().await.unwrap();
+    assert_eq!(follow_body["accepted"].as_bool(), Some(true));
+
+    let follow_apub = client
+        .get(format!(
+            "{}/apub/users/{}/followers/{}",
+            server.real_host_url, target_user, follower_user
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(follow_apub["type"].as_str(), Some("Follow"));
+    assert!(
+        follow_apub["actor"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/apub/users/{}", follower_user))
+    );
+
+    let join_apub = client
+        .get(format!(
+            "{}/apub/users/{}/followers/{}/join",
+            server.real_host_url, target_user, follower_user
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(join_apub["type"].as_str(), Some("Join"));
+
+    let accept_apub = client
+        .get(format!(
+            "{}/apub/users/{}/followers/{}/accept",
+            server.real_host_url, target_user, follower_user
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(accept_apub["type"].as_str(), Some("Accept"));
+    assert_eq!(accept_apub["object"]["type"].as_str(), Some("Follow"));
+    assert!(
+        accept_apub["object"]["actor"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/apub/users/{}", follower_user))
+    );
+    assert!(
+        accept_apub["object"]["object"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("/apub/users/{}", target_user))
+    );
+
+    let actor_apub = client
+        .get(format!(
+            "{}/apub/users/{}",
+            server.real_host_url, target_user
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(actor_apub["followers"].as_str().is_some());
+
+    client
+        .post(format!(
+            "{}/api/unstable/users/{}/unfollow",
+            server.real_host_url, target_user
+        ))
+        .bearer_auth(&follower_token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let follow_after_unfollow = client
+        .get(format!(
+            "{}/apub/users/{}/followers/{}",
+            server.real_host_url, target_user, follower_user
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        follow_after_unfollow.status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
 }

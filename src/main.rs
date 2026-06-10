@@ -1,7 +1,35 @@
-use futures::{Stream, StreamExt, TryStreamExt};
+#![allow(
+    clippy::clone_on_copy,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::field_reassign_with_default,
+    clippy::if_same_then_else,
+    clippy::io_other_error,
+    clippy::let_and_return,
+    clippy::manual_map,
+    clippy::map_flatten,
+    clippy::mem_replace_with_default,
+    clippy::multiple_crate_versions,
+    clippy::needless_borrow,
+    clippy::needless_borrows_for_generic_args,
+    clippy::needless_option_as_deref,
+    clippy::needless_question_mark,
+    clippy::needless_return,
+    clippy::redundant_field_names,
+    clippy::redundant_closure,
+    clippy::result_large_err,
+    clippy::suspicious_to_owned,
+    clippy::to_string_trait_impl,
+    clippy::too_many_arguments,
+    clippy::unnecessary_filter_map,
+    clippy::useless_conversion
+)]
+
+use base64::Engine as _;
+use futures::{Stream, TryStreamExt};
 pub use lotide_types as types;
 use markup5ever_rcdom as rcdom;
-use rand::Rng;
+use rand::Rng as _;
 use serde_derive::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -12,6 +40,7 @@ use std::sync::Arc;
 
 mod apub_util;
 mod config;
+mod hyper;
 mod lang;
 mod markdown;
 mod migrate;
@@ -32,7 +61,7 @@ pub use self::lang::Translator;
 #[serde(into = "url::Url")]
 pub struct BaseURL(url::Url);
 impl BaseURL {
-    pub fn path_segments_mut(&mut self) -> url::PathSegmentsMut {
+    pub fn path_segments_mut(&mut self) -> url::PathSegmentsMut<'_> {
         self.0.path_segments_mut().unwrap()
     }
     pub fn set_fragment(&mut self, fragment: Option<&str>) {
@@ -96,9 +125,15 @@ impl From<BaseURL> for url::Url {
     }
 }
 
+impl From<BaseURL> for activitystreams::iri_string::types::IriString {
+    fn from(src: BaseURL) -> activitystreams::iri_string::types::IriString {
+        src.0.as_str().parse().expect("BaseURL must be a valid IRI")
+    }
+}
+
 impl From<BaseURL> for activitystreams::base::AnyBase {
     fn from(src: BaseURL) -> activitystreams::base::AnyBase {
-        src.0.into()
+        activitystreams::iri_string::types::IriString::from(src).into()
     }
 }
 
@@ -106,7 +141,7 @@ impl From<BaseURL> for activitystreams::primitives::OneOrMany<activitystreams::b
     fn from(
         src: BaseURL,
     ) -> activitystreams::primitives::OneOrMany<activitystreams::base::AnyBase> {
-        src.0.into()
+        activitystreams::iri_string::types::IriString::from(src).into()
     }
 }
 
@@ -119,7 +154,7 @@ pub struct Pineapple {
 impl Pineapple {
     pub fn generate() -> Self {
         Self {
-            value: rand::thread_rng().gen(),
+            value: rand::rng().random(),
         }
     }
 
@@ -142,7 +177,7 @@ impl std::str::FromStr for Pineapple {
         let src = src.trim_matches(|c: char| !c.is_alphanumeric());
 
         let mut buf = [0; 4];
-        bs58::decode(src).into(&mut buf)?;
+        bs58::decode(src).onto(&mut buf)?;
         Ok(Self {
             value: i32::from_be_bytes(buf),
         })
@@ -151,6 +186,64 @@ impl std::str::FromStr for Pineapple {
 
 pub type DbPool = deadpool_postgres::Pool;
 pub type HttpClient = hyper::Client<hyper_tls::HttpsConnector<hyper::client::HttpConnector>>;
+
+pub const DB_POOL_MAX_SIZE_ENV: &str = "LOTIDE_DB_POOL_MAX_SIZE";
+#[cfg(target_os = "haiku")]
+pub const HAIKU_DISABLE_BUILTIN_TLS_ROOTS_ENV: &str = "LOTIDE_HAIKU_DISABLE_BUILTIN_TLS_ROOTS";
+pub const DEFAULT_DB_POOL_MAX_SIZE: usize = 6;
+pub const HARD_MAX_DB_POOL_MAX_SIZE: usize = 64;
+pub const HTTP_REQUEST_BODY_MAX_BYTES: usize = 32 * 1024 * 1024;
+pub const HTTP_ERROR_BODY_MAX_BYTES: usize = 64 * 1024;
+
+pub(crate) fn db_pool_max_size_from_env() -> usize {
+    parse_db_pool_max_size(std::env::var(DB_POOL_MAX_SIZE_ENV).ok().as_deref())
+}
+
+#[cfg(target_os = "haiku")]
+fn disable_haiku_builtin_tls_roots_from_env() -> bool {
+    matches!(
+        std::env::var(HAIKU_DISABLE_BUILTIN_TLS_ROOTS_ENV)
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
+}
+
+fn build_https_connector() -> hyper_tls::HttpsConnector<hyper::client::HttpConnector> {
+    #[cfg(target_os = "haiku")]
+    {
+        if disable_haiku_builtin_tls_roots_from_env() {
+            /*
+                Haiku's OpenSSL/native-tls root probing can block on some
+                installs while the server is still trying to reach its listen
+                socket. This fallback keeps local bring-up possible. Operators
+                should leave it disabled on production systems unless their
+                certificate store is known to trigger the startup hang.
+            */
+            let mut http = hyper::client::HttpConnector::new();
+            http.enforce_http(false);
+
+            let mut tls = native_tls::TlsConnector::builder();
+            tls.disable_built_in_roots(true);
+
+            return hyper_tls::HttpsConnector::from((
+                http,
+                tls.build()
+                    .expect("Failed to initialize Haiku fallback TLS connector")
+                    .into(),
+            ));
+        }
+    }
+
+    hyper_tls::HttpsConnector::new()
+}
+
+pub(crate) fn parse_db_pool_max_size(value: Option<&str>) -> usize {
+    match value.and_then(|value| value.trim().parse::<usize>().ok()) {
+        Some(size) if size > 0 => std::cmp::min(size, HARD_MAX_DB_POOL_MAX_SIZE),
+        _ => DEFAULT_DB_POOL_MAX_SIZE,
+    }
+}
 
 pub struct BaseContext {
     pub db_pool: DbPool,
@@ -174,6 +267,25 @@ pub struct BaseContext {
 }
 
 impl BaseContext {
+    pub(crate) async fn notify_worker(
+        &self,
+        db: &tokio_postgres::Client,
+    ) -> Result<(), crate::Error> {
+        if let Some(worker_trigger) = &self.worker_trigger {
+            match worker_trigger.clone().try_send(()) {
+                Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => Ok(()),
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                    Err(crate::Error::InternalStrStatic("Worker channel closed"))
+                }
+            }
+        } else {
+            // separate worker, send notification through database
+
+            db.execute("NOTIFY new_task", &[]).await?;
+            Ok(())
+        }
+    }
+
     pub fn process_href<'a>(
         &self,
         href: impl Into<Cow<'a, str>>,
@@ -220,7 +332,25 @@ impl BaseContext {
     ) -> Cow<'a, str> {
         let href = href.into();
         if href.starts_with("local-media://") {
-            format!("{}/stable/users/{}/avatar/href", self.host_url_api, user_id,).into()
+            format!("{}/stable/users/{}/avatar/href", self.host_url_api, user_id).into()
+        } else {
+            href
+        }
+    }
+
+    pub fn process_site_logo_href<'a>(&self, href: impl Into<Cow<'a, str>>) -> Cow<'a, str> {
+        let href = href.into();
+        if href.starts_with("local-media://") {
+            format!("{}/stable/instance/logo", self.host_url_api).into()
+        } else {
+            href
+        }
+    }
+
+    pub fn process_site_css_href<'a>(&self, href: impl Into<Cow<'a, str>>) -> Cow<'a, str> {
+        let href = href.into();
+        if href.starts_with("local-media://") {
+            format!("{}/stable/instance/stylesheet", self.host_url_api).into()
         } else {
             href
         }
@@ -236,19 +366,7 @@ impl BaseContext {
             &[&T::KIND, &tokio_postgres::types::Json(task), &T::MAX_ATTEMPTS],
         ).await?;
 
-        if let Some(worker_trigger) = &self.worker_trigger {
-            match worker_trigger.clone().try_send(()) {
-                Ok(_) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    Err(crate::Error::InternalStrStatic("Worker channel closed"))
-                }
-            }
-        } else {
-            // separate worker, send notification through database
-
-            db.execute("NOTIFY new_task", &[]).await?;
-            Ok(())
-        }
+        self.notify_worker(&db).await
     }
 
     pub async fn enqueue_tasks<T: crate::tasks::TaskDef>(
@@ -264,19 +382,7 @@ impl BaseContext {
             &[&T::KIND, &tasks_param, &T::MAX_ATTEMPTS],
         ).await?;
 
-        if let Some(worker_trigger) = &self.worker_trigger {
-            match worker_trigger.clone().try_send(()) {
-                Ok(_) | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => Ok(()),
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    Err(crate::Error::InternalStrStatic("Worker channel closed"))
-                }
-            }
-        } else {
-            // separate worker, send notification through database
-
-            db.execute("NOTIFY new_task", &[]).await?;
-            Ok(())
-        }
+        self.notify_worker(&db).await
     }
 }
 
@@ -306,7 +412,7 @@ impl<T: 'static + std::error::Error + Send> From<T> for Error {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum APIDOrLocal {
     Local,
     APID(url::Url),
@@ -389,6 +495,56 @@ pub struct PostInfoOwned {
     mentions: Vec<MentionInfo>,
 }
 
+const DERIVED_POST_TITLE_MAX_CHARS: usize = 80;
+
+pub fn post_title_or_fallback(
+    title: &str,
+    content_text: Option<&str>,
+    content_markdown: Option<&str>,
+    content_html: Option<&str>,
+) -> String {
+    let title = title.trim();
+
+    if !title.is_empty() {
+        return title.to_owned();
+    }
+
+    let content = content_text
+        .or(content_markdown)
+        .or(content_html)
+        .map(title_source_without_html_tags)
+        .unwrap_or_default();
+
+    let first_line = content.lines().map(str::trim).find(|line| !line.is_empty());
+
+    match first_line {
+        Some(line) => line.chars().take(DERIVED_POST_TITLE_MAX_CHARS).collect(),
+        None => "[no title]".to_owned(),
+    }
+}
+
+fn title_source_without_html_tags(src: &str) -> String {
+    let mut result = String::with_capacity(src.len());
+    let mut in_tag = false;
+
+    for ch in src.chars() {
+        match ch {
+            '<' => {
+                in_tag = true;
+                result.push(' ');
+            }
+            '>' => {
+                in_tag = false;
+                result.push(' ');
+            }
+            _ if !in_tag => result.push(ch),
+            _ => {}
+        }
+    }
+
+    result
+}
+
 impl<'a> From<&'a PostInfoOwned> for PostInfo<'a> {
     fn from(src: &'a PostInfoOwned) -> PostInfo<'a> {
         PostInfo {
@@ -436,6 +592,7 @@ impl<'a> From<&'a PollInfoOwned> for PollInfo<'a> {
 
 #[derive(Debug, Clone)]
 pub struct PollOption<'a> {
+    #[allow(dead_code)]
     id: PollOptionLocalID,
     name: &'a str,
     votes: u32,
@@ -486,7 +643,7 @@ pub const KEY_BITS: u32 = 2048;
 
 pub fn get_url_host(url: &url::Url) -> Option<String> {
     url.host_str().map(|host| match url.port() {
-        Some(port) => format!("{}:{}", host, port),
+        Some(port) => format!("{host}:{port}"),
         None => host.to_owned(),
     })
 }
@@ -519,6 +676,38 @@ pub fn get_path_and_query(url: &url::Url) -> Result<String, url::ParseError> {
     Ok(format!("{}{}", url.path(), url.query().unwrap_or("")))
 }
 
+pub fn i64_to_u32_saturating(value: i64) -> u32 {
+    match u32::try_from(value) {
+        Ok(value) => value,
+        Err(_) if value < 0 => 0,
+        Err(_) => u32::MAX,
+    }
+}
+
+pub fn i64_to_u64_saturating(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
+}
+
+pub fn u64_to_i32_saturating(value: u64) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+pub fn i32_to_u32_saturating(value: i32) -> u32 {
+    u32::try_from(value).unwrap_or(0)
+}
+
+pub fn usize_to_i32(value: usize) -> Result<i32, Error> {
+    i32::try_from(value).map_err(|_| Error::InternalStrStatic("Too many items for INTEGER field"))
+}
+
+pub fn usize_to_i64(value: usize) -> Result<i64, Error> {
+    i64::try_from(value).map_err(|_| Error::InternalStrStatic("Too many items for BIGINT field"))
+}
+
+pub fn i32_to_usize(value: i32) -> Result<usize, Error> {
+    usize::try_from(value).map_err(|_| Error::InternalStrStatic("Negative index from database"))
+}
+
 fn slice_iter<'a>(
     s: &'a [&'a (dyn postgres_types::ToSql + Sync)],
 ) -> impl ExactSizeIterator<Item = &'a dyn postgres_types::ToSql> + 'a {
@@ -527,7 +716,7 @@ fn slice_iter<'a>(
 
 pub async fn query_stream(
     db: &tokio_postgres::Client,
-    statement: &(impl tokio_postgres::ToStatement + ?Sized),
+    statement: &(impl tokio_postgres::ToStatement + Sync + ?Sized),
     params: ParamSlice<'_>,
 ) -> Result<tokio_postgres::RowStream, tokio_postgres::Error> {
     db.query_raw(statement, slice_iter(params)).await
@@ -568,12 +757,46 @@ pub async fn res_to_error(
     if res.status().is_success() {
         Ok(res)
     } else {
-        let bytes = hyper::body::to_bytes(res.into_body()).await?;
+        let bytes = read_body_limited(res.into_body(), HTTP_ERROR_BODY_MAX_BYTES).await?;
         Err(crate::Error::InternalStr(format!(
             "Error in remote response: {}",
             String::from_utf8_lossy(&bytes)
         )))
     }
+}
+
+pub async fn read_request_body(body: hyper::Body) -> Result<bytes::Bytes, Error> {
+    read_body_limited(body, HTTP_REQUEST_BODY_MAX_BYTES).await
+}
+
+pub async fn read_body_limited(mut body: hyper::Body, limit: usize) -> Result<bytes::Bytes, Error> {
+    /*
+        HTTP bodies arrive as a stream of chunks. hyper::body::to_bytes is
+        convenient, but it has no upper bound, so a broken or hostile peer can
+        force the process to buffer more data than this small server should ever
+        accept.
+    */
+    if let Some(upper) = body.size_hint().upper() {
+        if upper > limit as u64 {
+            return Err(Error::InternalStr(format!(
+                "HTTP body exceeded {limit} byte limit"
+            )));
+        }
+    }
+
+    let mut data = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let chunk = chunk?;
+        if data.len().saturating_add(chunk.len()) > limit {
+            return Err(Error::InternalStr(format!(
+                "HTTP body exceeded {limit} byte limit"
+            )));
+        }
+
+        data.extend_from_slice(&chunk);
+    }
+
+    Ok(bytes::Bytes::from(data))
 }
 
 pub trait ReqParts {
@@ -633,16 +856,16 @@ pub fn get_lang_for_header(accept_language: Option<&str>) -> Translator {
         None => vec![&default],
     };
 
-    let mut bundle = fluent::concurrent::FluentBundle::new(languages.iter().copied());
+    let mut bundle = fluent::concurrent::FluentBundle::new_concurrent(
+        languages.iter().map(|lang| (*lang).clone()).collect(),
+    );
     for lang in languages {
         if let Err(errors) = bundle.add_resource(&LANG_MAP[lang]) {
             for err in errors {
-                match err {
-                    fluent::FluentError::Overriding { .. } => {}
-                    _ => {
-                        log::error!("Failed to add language resource: {:?}", err);
-                        break;
-                    }
+                if let fluent::FluentError::Overriding { .. } = err {
+                } else {
+                    log::error!("Failed to add language resource: {err:?}");
+                    break;
                 }
             }
         }
@@ -669,35 +892,56 @@ pub fn get_auth_token(req: &impl ReqParts) -> Option<uuid::Uuid> {
     value.and_then(|value| value.parse::<uuid::Uuid>().ok())
 }
 
-pub async fn authenticate(
+pub fn authenticate<'a>(
     req: &impl ReqParts,
-    db: &tokio_postgres::Client,
-) -> Result<Option<UserLocalID>, Error> {
-    match get_auth_token(req) {
-        None => Ok(None),
-        Some(token) => {
-            let row = db
-                .query_opt("SELECT person FROM login WHERE token=$1", &[&token])
-                .await?;
+    db: &'a tokio_postgres::Client,
+) -> impl std::future::Future<Output = Result<Option<UserLocalID>, Error>> + Send + 'a {
+    let token = get_auth_token(req);
 
-            match row {
-                Some(row) => Ok(Some(UserLocalID(row.get(0)))),
-                None => Ok(None),
+    async move {
+        match token {
+            None => Ok(None),
+            Some(token) => {
+                let row = db
+                    .query_opt("SELECT person FROM login WHERE token=$1", &[&token])
+                    .await?;
+
+                match row {
+                    Some(row) => Ok(Some(UserLocalID(row.get(0)))),
+                    None => Ok(None),
+                }
             }
         }
     }
 }
 
-pub async fn require_login(
+pub fn require_login<'a>(
     req: &impl ReqParts,
-    db: &tokio_postgres::Client,
-) -> Result<UserLocalID, Error> {
-    authenticate(req, db).await?.ok_or_else(|| {
-        Error::UserError(simple_response(
-            hyper::StatusCode::UNAUTHORIZED,
-            "Login Required",
-        ))
-    })
+    db: &'a tokio_postgres::Client,
+) -> impl std::future::Future<Output = Result<UserLocalID, Error>> + Send + 'a {
+    let token = get_auth_token(req);
+
+    async move {
+        match token {
+            None => Err(Error::UserError(simple_response(
+                hyper::StatusCode::UNAUTHORIZED,
+                "Login Required",
+            ))),
+            Some(token) => {
+                let row = db
+                    .query_opt("SELECT person FROM login WHERE token=$1", &[&token])
+                    .await?;
+
+                match row {
+                    Some(row) => Ok(UserLocalID(row.get(0))),
+                    None => Err(Error::UserError(simple_response(
+                        hyper::StatusCode::UNAUTHORIZED,
+                        "Login Required",
+                    ))),
+                }
+            }
+        }
+    }
 }
 
 pub async fn is_site_admin(db: &tokio_postgres::Client, user: UserLocalID) -> Result<bool, Error> {
@@ -723,7 +967,7 @@ pub async fn is_local_user(db: &tokio_postgres::Client, user: UserLocalID) -> Re
 pub fn spawn_task<F: std::future::Future<Output = Result<(), Error>> + Send + 'static>(task: F) {
     use futures::future::TryFutureExt;
     tokio::spawn(task.map_err(|err| {
-        log::error!("Error in task: {:?}", err);
+        log::error!("Error in task: {err:?}");
     }));
 }
 
@@ -740,11 +984,7 @@ macro_rules! html_ns {
     () => {
         html5ever::namespace_url!("")
     };
-    ($ns:ident) => {{
-        use html5ever::namespace_url;
-
-        html5ever::ns!($ns)
-    }};
+    ($ns:ident) => {{ html5ever::ns!($ns) }};
 }
 
 lazy_static::lazy_static! {
@@ -785,6 +1025,7 @@ pub fn clean_html(src: &str, image_handling: ImageHandling) -> String {
                 // ???
                 html5ever::QualName::new(None, html_ns!(html), html5ever::local_name!("body")),
                 vec![],
+                false,
             )
             .from_utf8()
             .read_from(&mut content.as_bytes())
@@ -873,7 +1114,7 @@ pub fn clean_html(src: &str, image_handling: ImageHandling) -> String {
             let output_root = process_node(dom.document.children.borrow()[0].clone());
 
             match output_root {
-                None => "".to_owned(),
+                None => String::new(),
                 Some(output_root) => {
                     let mut output = Vec::new();
                     html5ever::serialize(
@@ -1035,22 +1276,24 @@ pub fn on_post_add_comment(comment: CommentInfo<'static>, ctx: Arc<crate::RouteC
                 post_or_parent_author_ap_id,
             ) = match comment.parent {
                 None => {
-                    let author_id = UserLocalID(post_row.get(6));
+                    let author_id = post_row.get::<_, Option<i64>>(6).map(UserLocalID);
                     if post_local {
                         (
                             None,
-                            Some(author_id),
-                            Some(true),
-                            Some(Cow::Owned(
-                                crate::apub_util::LocalObjectRef::User(author_id)
-                                    .to_local_uri(&ctx.host_url_apub),
-                            )),
+                            author_id,
+                            author_id.map(|_| true),
+                            author_id.map(|author_id| {
+                                Cow::Owned(
+                                    crate::apub_util::LocalObjectRef::User(author_id)
+                                        .to_local_uri(&ctx.host_url_apub),
+                                )
+                            }),
                         )
                     } else {
                         (
                             None,
-                            Some(author_id),
-                            Some(false),
+                            author_id,
+                            author_id.map(|_| false),
                             post_row
                                 .get::<_, Option<_>>(3)
                                 .map(std::str::FromStr::from_str)
@@ -1232,15 +1475,16 @@ pub async fn recalculate_cached_post_likes(
     trans: &mut tokio_postgres::Transaction<'_>,
     post: PostLocalID,
 ) -> Result<(), crate::Error> {
-    trans.execute("UPDATE post SET cached_likes_for_sort=(SELECT COUNT(*) FROM post_like WHERE post = post.id AND person != post.author) WHERE id=$1", &[&post]).await?;
+    trans.execute("UPDATE post SET cached_likes_for_sort=(CASE WHEN post.local THEN (SELECT COUNT(*) FROM post_like WHERE post_like.post = post.id AND post_like.person != post.author) ELSE GREATEST(post.cached_likes_for_sort, (SELECT COUNT(*) FROM post_like WHERE post_like.post = post.id AND post_like.person != post.author)) END) WHERE id=$1", &[&post]).await?;
 
     Ok(())
 }
 
 pub enum MediaStorage {
     Local(std::path::PathBuf),
+    #[cfg(feature = "s3-storage")]
     S3 {
-        client: rusoto_s3::S3Client,
+        client: aws_sdk_s3::Client,
         bucket: String,
     },
 }
@@ -1260,22 +1504,15 @@ impl MediaStorage {
                 let file = tokio::fs::File::open(path).await?;
                 Ok(Box::pin(
                     tokio_util::codec::FramedRead::new(file, tokio_util::codec::BytesCodec::new())
-                        .map_ok(|x| x.freeze()),
+                        .map_ok(bytes::BytesMut::freeze),
                 ))
             }
+            #[cfg(feature = "s3-storage")]
             MediaStorage::S3 { client, bucket } => {
-                use rusoto_s3::S3;
+                let res = client.get_object().bucket(bucket).key(path).send().await?;
+                let body = res.body.collect().await?.into_bytes();
 
-                let mut req: rusoto_s3::GetObjectRequest = Default::default();
-                req.bucket = bucket.clone();
-                req.key = path.to_owned();
-
-                let res = client.get_object(req).await?;
-                let body = res
-                    .body
-                    .ok_or(crate::Error::InternalStrStatic("Missing body in S3 return"))?;
-
-                Ok(Box::pin(body))
+                Ok(Box::pin(futures::stream::once(async move { Ok(body) })))
             }
         }
     }
@@ -1285,6 +1522,9 @@ impl MediaStorage {
         src: impl Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
         content_type: &str,
     ) -> Result<String, crate::Error> {
+        #[cfg(not(feature = "s3-storage"))]
+        let _ = content_type;
+
         match self {
             MediaStorage::Local(root) => {
                 let filename = uuid::Uuid::new_v4().to_string();
@@ -1294,149 +1534,77 @@ impl MediaStorage {
                     use tokio::io::AsyncWriteExt;
                     let file = tokio::fs::File::create(path).await?;
                     src.try_fold(file, |mut file, chunk| async move {
-                        file.write_all(chunk.as_ref()).await.map(|_| file)
+                        file.write_all(chunk.as_ref()).await.map(|()| file)
                     })
                     .await?;
                 }
 
                 Ok(filename)
             }
+            #[cfg(feature = "s3-storage")]
             MediaStorage::S3 { client, bucket } => {
-                use rusoto_s3::S3;
-
                 let key = uuid::Uuid::new_v4().to_string();
 
-                struct MultipartUploadState {
-                    upload_id: String,
-                    parts: Vec<rusoto_s3::CompletedPart>,
-                }
+                let body = src
+                    .try_fold(Vec::new(), |mut body, chunk| async move {
+                        body.extend_from_slice(&chunk);
+                        Ok(body)
+                    })
+                    .await?;
 
-                match src.map_err(crate::Error::from).fold(((None, vec![], 0), None), {
-                    |(mut multipart_state, err), chunk| {
-                        let key = key.clone();
-                        async move {
-                        match (err, chunk) {
-                            (Some(err), _) => (multipart_state, Some(err)),
-                            (None, Err(err)) => (multipart_state, Some(err)),
-                            (None, Ok(chunk)) => {
-                                multipart_state.2 += chunk.len();
-                                multipart_state.1.push(chunk);
+                client
+                    .put_object()
+                    .bucket(bucket)
+                    .key(&key)
+                    .content_type(content_type)
+                    .body(aws_sdk_s3::primitives::ByteStream::from(body))
+                    .send()
+                    .await?;
 
-                                const MIN_PART_SIZE: usize = 5_000_000; // 5 MB
-
-                                if multipart_state.2 > MIN_PART_SIZE {
-                                    let upload_state = match &mut multipart_state.0 {
-                                        Some(state) => state,
-                                        None => {
-                                            let output = match client.create_multipart_upload(rusoto_s3::CreateMultipartUploadRequest {
-                                                bucket: bucket.clone(),
-                                                key: key.clone(),
-                                                content_type: Some(content_type.to_owned()),
-                                                ..Default::default()
-                                            }).await {
-                                                Ok(output) => output,
-                                                Err(err) => return (multipart_state, Some(err.into())),
-                                            };
-
-                                            let upload_id = match output.upload_id {
-                                                Some(x) => x,
-                                                None => return (multipart_state, Some(crate::Error::InternalStrStatic("Missing upload_id in S3 response"))),
-                                            };
-
-                                            multipart_state.0 = Some(MultipartUploadState {
-                                                upload_id,
-                                                parts: Vec::new(),
-                                            });
-                                            multipart_state.0.as_mut().unwrap()
-                                        }
-                                    };
-
-                                    let part_number = (upload_state.parts.len() + 1) as i64;
-
-                                    let current_part_contents = std::mem::replace(&mut multipart_state.1, Vec::new());
-                                    let current_part_size = multipart_state.2;
-                                    multipart_state.2 = 0;
-
-                                    match client.upload_part(rusoto_s3::UploadPartRequest {
-                                        body: Some(rusoto_core::ByteStream::new_with_size(futures::stream::iter(current_part_contents.into_iter().map(Ok)), current_part_size)),
-                                        bucket: bucket.clone(),
-                                        key: key.clone(),
-                                        part_number,
-                                        upload_id: upload_state.upload_id.clone(),
-                                        ..Default::default()
-                                    }).await {
-                                        Err(err) => {
-                                            return (multipart_state, Some(err.into()));
-                                        }
-                                        Ok(result) => {
-                                            upload_state.parts.push(rusoto_s3::CompletedPart {
-                                                e_tag: result.e_tag,
-                                                part_number: Some(part_number),
-                                            });
-                                        }
-                                    }
-
-                                }
-
-                                (multipart_state, None)
-                            }
-                        }
-                    }
-                    }
-                }).await {
-                    (multipart_state, None) => {
-                        let current_part_contents = multipart_state.1;
-                        let current_part_size = multipart_state.2;
-                        if let Some(mut upload_state) = multipart_state.0 {
-                            let part_number = (upload_state.parts.len() + 1) as i64;
-
-                            let result = client.upload_part(rusoto_s3::UploadPartRequest {
-                                body: Some(rusoto_core::ByteStream::new_with_size(futures::stream::iter(current_part_contents.into_iter().map(Ok)), current_part_size)),
-                                bucket: bucket.clone(),
-                                key: key.clone(),
-                                part_number,
-                                upload_id: upload_state.upload_id.clone(),
-                                ..Default::default()
-                            }).await?;
-                            upload_state.parts.push(rusoto_s3::CompletedPart {
-                                e_tag: result.e_tag,
-                                part_number: Some(part_number),
-                            });
-
-                            client.complete_multipart_upload(rusoto_s3::CompleteMultipartUploadRequest {
-                                bucket: bucket.clone(),
-                                key: key.clone(),
-                                upload_id: upload_state.upload_id,
-                                ..Default::default()
-                            }).await?;
-                        } else {
-                            client.put_object(rusoto_s3::PutObjectRequest {
-                                bucket: bucket.clone(),
-                                key: key.clone(),
-                                body: Some(rusoto_core::ByteStream::new_with_size(futures::stream::iter(current_part_contents.into_iter().map(Ok)), current_part_size)),
-                                ..Default::default()
-                            }).await?;
-                        }
-
-                        Ok(key)
-                    }
-                    (multipart_state, Some(err)) => {
-                        if let Some(upload_state) = multipart_state.0 {
-                            if let Err(err) = client.abort_multipart_upload(rusoto_s3::AbortMultipartUploadRequest {
-                                bucket: bucket.clone(),
-                                key: key.clone(),
-                                upload_id: upload_state.upload_id,
-                                ..Default::default()
-                            }).await {
-                                log::error!("Failed to abort multipart upload: {:?}", err);
-                            }
-                        }
-
-                        Err(err.into())
-                    }
-                }
+                Ok(key)
             }
         }
+    }
+}
+
+#[cfg(feature = "s3-storage")]
+async fn configure_s3_media_storage(config: &Config) -> MediaStorage {
+    /*
+        S3 support is optional so Cygwin can build a local-media-only binary.
+        The AWS SDK currently pulls TLS backends that are not portable there.
+    */
+    let mut aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest());
+
+    if let Some(region) = config.media_s3_region.clone() {
+        aws_config = aws_config.region(aws_sdk_s3::config::Region::new(region));
+    }
+
+    if let Some(key_id) = config.media_s3_access_key_id.clone() {
+        aws_config = aws_config.credentials_provider(aws_sdk_s3::config::Credentials::new(
+            key_id,
+            config
+                .media_s3_secret_key
+                .clone()
+                .expect("Missing secret key for media S3"),
+            None,
+            None,
+            "lotide",
+        ));
+    }
+
+    let aws_config = aws_config.load().await;
+    let mut s3_config = aws_sdk_s3::config::Builder::from(&aws_config);
+
+    if let Some(endpoint) = config.media_s3_endpoint.clone() {
+        s3_config = s3_config.endpoint_url(endpoint).force_path_style(true);
+    }
+
+    MediaStorage::S3 {
+        client: aws_sdk_s3::Client::from_conf(s3_config.build()),
+        bucket: config
+            .media_location
+            .clone()
+            .expect("Missing media_location"),
     }
 }
 
@@ -1449,23 +1617,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .short('c')
                 .value_name("FILE")
                 .help("Sets a path to a config file")
-                .allow_invalid_utf8(true)
-                .takes_value(true),
+                .value_parser(clap::value_parser!(std::ffi::OsString)),
         )
         .subcommand(
             clap::Command::new("migrate").arg(
                 clap::Arg::new("ACTION")
                     .default_value("up")
-                    .possible_values(&["up", "down", "setup"]),
+                    .value_parser(["up", "down", "setup"]),
             ),
         )
         .subcommand(clap::Command::new("worker"))
         .get_matches();
 
-    let config = Config::load(matches.value_of_os("config")).expect("Failed to load config");
+    let config = Config::load(
+        matches
+            .get_one::<std::ffi::OsString>("config")
+            .map(std::ffi::OsString::as_os_str),
+    )
+    .expect("Failed to load config");
 
     if let Some(matches) = matches.subcommand_matches("migrate") {
-        crate::migrate::run(config, matches);
+        crate::migrate::run(config, matches)?;
         Ok(())
     } else if matches.subcommand_matches("worker").is_some() {
         run(config, RunType::Worker)
@@ -1499,11 +1671,11 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                     Ok(()) => {
                         // ok
                     }
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
                         log::warn!("Loop appears to be stuck");
                         break;
                     }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
                         log::warn!("Stuck detector disappeared");
                         break;
                     }
@@ -1515,7 +1687,7 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
     let pg_tls_connector = postgres_native_tls::MakeTlsConnector::new({
         let mut builder = native_tls::TlsConnector::builder();
 
-        if let Some(path) = config.database_certificate_path {
+        if let Some(path) = &config.database_certificate_path {
             builder.add_root_certificate(native_tls::Certificate::from_pem(&std::fs::read(path)?)?);
         }
 
@@ -1523,11 +1695,17 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
     });
 
     let pg_config: tokio_postgres::config::Config = config.database_url.parse().unwrap();
+    let db_pool_max_size = db_pool_max_size_from_env();
 
-    let db_pool = deadpool_postgres::Pool::new(
-        deadpool_postgres::Manager::new(pg_config.clone(), pg_tls_connector.clone()),
-        16,
-    );
+    log::info!("Using Postgres connection pool size {db_pool_max_size}");
+
+    let db_pool = deadpool_postgres::Pool::builder(deadpool_postgres::Manager::new(
+        pg_config.clone(),
+        pg_tls_connector.clone(),
+    ))
+    .max_size(db_pool_max_size)
+    .build()
+    .expect("Failed to initialize Postgres connection pool");
 
     // ensure latest migrations have been applied
     {
@@ -1536,9 +1714,11 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
         let row = db
             .query_opt("SELECT 1 FROM __migrant_migrations WHERE tag=$1", &[&tag])
             .await?;
-        if row.is_none() {
-            panic!("Unapplied migrations detected, run `lotide migrate`");
-        }
+        assert!(
+            row.is_some(),
+            "Unapplied migrations detected, run `lotide migrate`"
+        );
+        log::info!("Database migration status is current");
     }
 
     let vapid_key: openssl::ec::EcKey<openssl::pkey::Private> = {
@@ -1546,32 +1726,31 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
         let row = db
             .query_one("SELECT vapid_private_key FROM site WHERE local=TRUE", &[])
             .await?;
-        match row.get(0) {
-            Some(bytes) => openssl::ec::EcKey::private_key_from_pem(bytes)?,
-            None => {
-                let key = openssl::ec::EcKey::generate(
-                    openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1)?
-                        .as_ref(),
-                )?;
-                let private_key_bytes = key.private_key_to_pem()?;
-                db.execute(
-                    "UPDATE site SET vapid_private_key=$1 WHERE local=TRUE",
-                    &[&private_key_bytes],
-                )
-                .await?;
+        if let Some(bytes) = row.get(0) {
+            openssl::ec::EcKey::private_key_from_pem(bytes)?
+        } else {
+            let key = openssl::ec::EcKey::generate(
+                openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1)?
+                    .as_ref(),
+            )?;
+            let private_key_bytes = key.private_key_to_pem()?;
+            db.execute(
+                "UPDATE site SET vapid_private_key=$1 WHERE local=TRUE",
+                &[&private_key_bytes],
+            )
+            .await?;
 
-                key
-            }
+            key
         }
     };
+    log::info!("Loaded web push VAPID key");
 
     let vapid_signature_builder = web_push::VapidSignatureBuilder::from_pem_no_sub::<&[u8]>(
         vapid_key.private_key_to_pem()?.as_ref(),
     )?;
-    let vapid_public_key_base64 = base64::encode_config(
-        vapid_signature_builder.get_public_key(),
-        base64::Config::new(base64::CharacterSet::UrlSafe, false),
-    );
+    let vapid_public_key_base64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(vapid_signature_builder.get_public_key());
+    log::info!("Initialized web push VAPID signer");
 
     let host_url_apub: url::Url = config
         .host_url_activitypub
@@ -1595,7 +1774,11 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                 }
                 "smtps" => lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::relay(host)
                     .expect("Failed to initialize SMTP transport"),
-                _ => panic!("Unrecognized scheme for SMTP_URL"),
+                _ => {
+                    return Err(
+                        format!("Unrecognized scheme for SMTP_URL: {}", url.scheme()).into(),
+                    );
+                }
             };
 
             if url.username() != "" || url.password().is_some() {
@@ -1615,17 +1798,19 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
         .as_ref()
         .map(|value| value.parse().expect("Failed to parse SMTP_FROM"));
 
-    if mailer.is_some() && mail_from.is_none() {
-        panic!("SMTP_URL was provided, but SMTP_FROM was not");
-    }
+    assert!(
+        !(mailer.is_some() && mail_from.is_none()),
+        "SMTP_URL was provided, but SMTP_FROM was not"
+    );
 
     let allow_forwarded = config.allow_forwarded;
 
     let (run_worker, run_server) = match run_type {
         RunType::Worker => {
-            if !config.separate_worker {
-                panic!("Cannot run worker without SEPARATE_WORKER");
-            }
+            assert!(
+                config.separate_worker,
+                "Cannot run worker without SEPARATE_WORKER"
+            );
 
             (true, false)
         }
@@ -1635,6 +1820,12 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
     let (worker_trigger, worker_rx) = tokio::sync::mpsc::channel(1);
 
     let routes = Arc::new(routes::route_root());
+    let http_client = {
+        log::info!("Initializing outbound HTTPS client");
+        hyper::Client::builder().build(build_https_connector())
+    };
+    log::info!("Initialized outbound HTTPS client");
+
     let context = Arc::new(BaseContext {
         local_hostname: get_url_host(&host_url_apub)
             .expect("Couldn't find host in HOST_URL_ACTIVITYPUB"),
@@ -1655,52 +1846,21 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                     .expect("Missing media_location")
                     .into(),
             )),
+            #[cfg(feature = "s3-storage")]
+            Some("s3") => Some(configure_s3_media_storage(&config).await),
+            #[cfg(not(feature = "s3-storage"))]
             Some("s3") => {
-                let region = match config.media_s3_endpoint {
-                    None => match config.media_s3_region {
-                        None => Default::default(),
-                        Some(src) => src.parse().expect("Unknown AWS region"),
-                    },
-                    Some(endpoint) => rusoto_core::Region::Custom {
-                        name: match config.media_s3_region {
-                            None => "us-east-1".to_string(),
-                            Some(name) => name,
-                        },
-                        endpoint,
-                    },
-                };
-
-                let credentials: Box<dyn rusoto_credential::ProvideAwsCredentials + Send + Sync> =
-                    match config.media_s3_access_key_id {
-                        None => {
-                            Box::new(rusoto_credential::DefaultCredentialsProvider::new().unwrap())
-                        }
-                        Some(key_id) => Box::new(rusoto_credential::StaticProvider::new(
-                            key_id,
-                            config
-                                .media_s3_secret_key
-                                .expect("Missing secret key for media S3"),
-                            None,
-                            None,
-                        )),
-                    };
-
-                Some(MediaStorage::S3 {
-                    client: rusoto_s3::S3Client::new_with(
-                        rusoto_core::request::HttpClient::new().unwrap(),
-                        credentials,
-                        region,
-                    ),
-                    bucket: config.media_location.expect("Missing media_location"),
-                })
+                return Err(
+                    "media_storage=s3 requires a binary built with the s3-storage feature".into(),
+                );
             }
             Some(_) => {
-                panic!("Unknown media_storage type");
+                return Err("Unknown media_storage type".into());
             }
         },
         host_url_api: config.host_url_api.clone(),
         host_url_apub,
-        http_client: hyper::Client::builder().build(hyper_tls::HttpsConnector::new()),
+        http_client,
         user_agent: format!("lotide/{}", env!("CARGO_PKG_VERSION")),
         apub_proxy_rewrites: config.apub_proxy_rewrites,
         api_ratelimit: henry::RatelimitBucket::new(300),
@@ -1727,19 +1887,30 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
             }
         },
         {
-            let port = config.port;
+            let listen_addr = std::net::SocketAddr::new(config.bind_address, config.port);
             async move {
                 if run_server {
-                    let server = hyper::Server::bind(
-                        &(std::net::Ipv6Addr::UNSPECIFIED, port).into(),
-                    )
-                    .serve(hyper::service::make_service_fn(
-                        |sock: &hyper::server::conn::AddrStream| {
-                            let addr_direct = sock.remote_addr().ip();
-                            let routes = routes.clone();
-                            let context = context.clone();
-                            async move {
-                                Ok::<_, hyper::Error>(hyper::service::service_fn(move |req| {
+                    log::info!("Listening on {listen_addr}");
+
+                    let listener = tokio::net::TcpListener::bind(listen_addr).await.unwrap();
+
+                    loop {
+                        let (stream, remote_addr) = match listener.accept().await {
+                            Ok(connection) => connection,
+                            Err(err) => {
+                                log::warn!("HTTP accept failed: {err}");
+                                continue;
+                            }
+                        };
+                        let addr_direct = remote_addr.ip();
+                        let routes = routes.clone();
+                        let context = context.clone();
+
+                        tokio::spawn(async move {
+                            let io = hyper::rt::TokioIo::new(stream);
+                            let service = hyper::service::service_fn(
+                                move |req: hyper::Request<hyper::body::Incoming>| {
+                                    let req = req.map(hyper::Body::from_incoming);
                                     let routes = routes.clone();
                                     let context = context.clone();
                                     async move {
@@ -1757,11 +1928,13 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                                                     })
                                                     .and_then(|value| value.parse().map_err(|_| ()))
                                                 {
-                                                    Err(_) => {
-                                                        return Ok(simple_response(
-                                                            hyper::StatusCode::BAD_REQUEST,
-                                                            "Invalid X-Forwarded-For value",
-                                                        ));
+                                                    Err(()) => {
+                                                        return Ok::<_, std::convert::Infallible>(
+                                                            simple_response(
+                                                                hyper::StatusCode::BAD_REQUEST,
+                                                                "Invalid X-Forwarded-For value",
+                                                            ),
+                                                        );
                                                     }
                                                     Ok(value) => Some(value),
                                                 }
@@ -1807,7 +1980,7 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                                             }
                                         };
 
-                                        Ok::<_, hyper::Error>(match result {
+                                        Ok::<_, std::convert::Infallible>(match result {
                                             Ok(val) => val,
                                             Err(Error::UserError(res)) => res,
                                             Err(Error::RoutingError(err)) => {
@@ -1826,7 +1999,7 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                                                 )
                                             }
                                             Err(Error::Internal(err)) => {
-                                                log::error!("Error: {:?}", err);
+                                                log::error!("Error: {err:?}");
 
                                                 simple_response(
                                                     hyper::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1834,7 +2007,7 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                                                 )
                                             }
                                             Err(Error::InternalStr(err)) => {
-                                                log::error!("Error: {}", err);
+                                                log::error!("Error: {err}");
 
                                                 simple_response(
                                                     hyper::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1842,7 +2015,7 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                                                 )
                                             }
                                             Err(Error::InternalStrStatic(err)) => {
-                                                log::error!("Error: {}", err);
+                                                log::error!("Error: {err}");
 
                                                 simple_response(
                                                     hyper::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1851,12 +2024,17 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                                             }
                                         })
                                     }
-                                }))
-                            }
-                        },
-                    ));
+                                },
+                            );
 
-                    server.await.unwrap();
+                            if let Err(err) = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(io, service)
+                                .await
+                            {
+                                log::warn!("HTTP connection failed: {err}");
+                            }
+                        });
+                    }
                 } else {
                     async move {
                         let (listen_client, mut listen_conn) =
@@ -1869,10 +2047,13 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                             stream.try_fold(worker_trigger, |worker_trigger, msg| async move {
                                 if let tokio_postgres::AsyncMessage::Notification(_) = msg {
                                     match worker_trigger.clone().try_send(()) {
-                                        Ok(_)
-                                        | Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
-                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                            panic!("Worker channel closed");
+                                        Ok(())
+                                        | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
+                                        }
+                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                                            return Err(crate::Error::InternalStrStatic(
+                                                "Worker channel closed",
+                                            ));
                                         }
                                     }
                                 }
@@ -1894,4 +2075,560 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::hyper;
+
+    const TASK_CLEANUP_UP: &str =
+        include_str!("../migrations/20260602153000_task-cleanup-indices/up.sql");
+    const TASK_CLEANUP_DOWN: &str =
+        include_str!("../migrations/20260602153000_task-cleanup-indices/down.sql");
+    const FEATURED_DEDUPE_UP: &str =
+        include_str!("../migrations/20260602234000_featured-task-dedupe/up.sql");
+    const FEATURED_DEDUPE_DOWN: &str =
+        include_str!("../migrations/20260602234000_featured-task-dedupe/down.sql");
+    const PERSON_CLEANUP_FK_UP: &str =
+        include_str!("../migrations/20260603003000_person-cleanup-fk-indices/up.sql");
+    const PERSON_CLEANUP_FK_DOWN: &str =
+        include_str!("../migrations/20260603003000_person-cleanup-fk-indices/down.sql");
+    const OUTBOX_FETCH_DEDUPE_UP: &str =
+        include_str!("../migrations/20260603120000_outbox-fetch-dedupe/up.sql");
+    const OUTBOX_FETCH_DEDUPE_DOWN: &str =
+        include_str!("../migrations/20260603120000_outbox-fetch-dedupe/down.sql");
+    const COMMUNITY_MAINTENANCE_UP: &str =
+        include_str!("../migrations/20260603170000_community-maintenance/up.sql");
+    const COMMUNITY_MAINTENANCE_DOWN: &str =
+        include_str!("../migrations/20260603170000_community-maintenance/down.sql");
+    const ACTOR_TARGET_PROFILE_UP: &str =
+        include_str!("../migrations/20260604190000_actor-target-profile/up.sql");
+    const ACTOR_TARGET_PROFILE_DOWN: &str =
+        include_str!("../migrations/20260604190000_actor-target-profile/down.sql");
+    const DISCOVERY_ACTIVE_COMMUNITIES_UP: &str =
+        include_str!("../migrations/20260605200000_discovery-active-communities/up.sql");
+    const DISCOVERY_ACTIVE_COMMUNITIES_DOWN: &str =
+        include_str!("../migrations/20260605200000_discovery-active-communities/down.sql");
+    const BROAD_COMMUNITY_DISCOVERY_UP: &str =
+        include_str!("../migrations/20260605213000_broad-community-discovery/up.sql");
+    const BROAD_COMMUNITY_DISCOVERY_DOWN: &str =
+        include_str!("../migrations/20260605213000_broad-community-discovery/down.sql");
+    const KNOWN_DEFEDERATED_HOST_SUPPRESSION_UP: &str =
+        include_str!("../migrations/20260605214500_known-defederated-host-suppression/up.sql");
+    const KNOWN_DEFEDERATED_HOST_SUPPRESSION_DOWN: &str =
+        include_str!("../migrations/20260605214500_known-defederated-host-suppression/down.sql");
+    const PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_UP: &str =
+        include_str!("../migrations/20260605220000_prune-cross-host-community-discovery/up.sql");
+    const PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_DOWN: &str =
+        include_str!("../migrations/20260605220000_prune-cross-host-community-discovery/down.sql");
+    const HOST_INTERACTION_PROBES_UP: &str =
+        include_str!("../migrations/20260605224500_host-interaction-probes/up.sql");
+    const HOST_INTERACTION_PROBES_DOWN: &str =
+        include_str!("../migrations/20260605224500_host-interaction-probes/down.sql");
+    const SITE_LOGO_UP: &str = include_str!("../migrations/20260605231500_site-logo/up.sql");
+    const SITE_LOGO_DOWN: &str = include_str!("../migrations/20260605231500_site-logo/down.sql");
+    const COLLECTION_TARGETS_UP: &str =
+        include_str!("../migrations/20260606062000_collection-targets/up.sql");
+    const COLLECTION_TARGETS_DOWN: &str =
+        include_str!("../migrations/20260606062000_collection-targets/down.sql");
+    const FOLLOW_FEDERATION_STATUS_UP: &str =
+        include_str!("../migrations/20260606103000_follow-federation-status/up.sql");
+    const FOLLOW_FEDERATION_STATUS_DOWN: &str =
+        include_str!("../migrations/20260606103000_follow-federation-status/down.sql");
+    const USER_FOLLOW_FEDERATION_STATUS_UP: &str =
+        include_str!("../migrations/20260606113000_user-follow-federation-status/up.sql");
+    const USER_FOLLOW_FEDERATION_STATUS_DOWN: &str =
+        include_str!("../migrations/20260606113000_user-follow-federation-status/down.sql");
+    const RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP: &str =
+        include_str!("../migrations/20260606164500_reclassify-ambiguous-domain-blocks/up.sql");
+    const RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_DOWN: &str =
+        include_str!("../migrations/20260606164500_reclassify-ambiguous-domain-blocks/down.sql");
+    const FEDERATION_EVENT_LEDGER_UP: &str =
+        include_str!("../migrations/20260607090000_federation-event-ledger/up.sql");
+    const FEDERATION_EVENT_LEDGER_DOWN: &str =
+        include_str!("../migrations/20260607090000_federation-event-ledger/down.sql");
+    const USER_FOLLOW_NOTIFICATIONS_UP: &str =
+        include_str!("../migrations/20260607100000_user-follow-notifications/up.sql");
+    const USER_FOLLOW_NOTIFICATIONS_DOWN: &str =
+        include_str!("../migrations/20260607100000_user-follow-notifications/down.sql");
+    const ADMIN_CLEANUP_HOST_PROFILES_UP: &str =
+        include_str!("../migrations/20260607133000_admin-cleanup-host-profiles/up.sql");
+    const ADMIN_CLEANUP_HOST_PROFILES_DOWN: &str =
+        include_str!("../migrations/20260607133000_admin-cleanup-host-profiles/down.sql");
+    const LIKE_ACTIVITY_INSTANCE_IDS_UP: &str =
+        include_str!("../migrations/20260607191000_like-activity-instance-ids/up.sql");
+    const LIKE_ACTIVITY_INSTANCE_IDS_DOWN: &str =
+        include_str!("../migrations/20260607191000_like-activity-instance-ids/down.sql");
+    const SITE_CSS_UP: &str = include_str!("../migrations/20260609002000_site-css/up.sql");
+    const SITE_CSS_DOWN: &str = include_str!("../migrations/20260609002000_site-css/down.sql");
+
+    #[test]
+    fn db_pool_size_defaults_when_env_value_is_missing_or_invalid() {
+        assert_eq!(
+            crate::parse_db_pool_max_size(None),
+            crate::DEFAULT_DB_POOL_MAX_SIZE
+        );
+        assert_eq!(
+            crate::parse_db_pool_max_size(Some("")),
+            crate::DEFAULT_DB_POOL_MAX_SIZE
+        );
+        assert_eq!(
+            crate::parse_db_pool_max_size(Some("not-a-number")),
+            crate::DEFAULT_DB_POOL_MAX_SIZE
+        );
+        assert_eq!(
+            crate::parse_db_pool_max_size(Some("0")),
+            crate::DEFAULT_DB_POOL_MAX_SIZE
+        );
+    }
+
+    #[test]
+    fn db_pool_size_uses_valid_value_and_clamps_extreme_values() {
+        assert_eq!(crate::parse_db_pool_max_size(Some("4")), 4);
+        assert_eq!(
+            crate::parse_db_pool_max_size(Some("9999")),
+            crate::HARD_MAX_DB_POOL_MAX_SIZE
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_body_reader_accepts_small_bodies() {
+        let body = crate::read_body_limited(hyper::Body::from("small"), 8)
+            .await
+            .unwrap();
+
+        assert_eq!(&body[..], b"small");
+    }
+
+    #[tokio::test]
+    async fn bounded_body_reader_rejects_oversized_bodies() {
+        let err = crate::read_body_limited(hyper::Body::from("large"), 4)
+            .await
+            .unwrap_err();
+
+        match err {
+            crate::Error::InternalStr(message) => {
+                assert!(message.contains("HTTP body exceeded 4 byte limit"));
+            }
+            err => panic!("unexpected error: {:?}", err),
+        }
+    }
+
+    #[test]
+    fn blank_post_titles_use_first_body_line_or_no_title() {
+        assert_eq!(
+            crate::post_title_or_fallback("   ", Some("First line\nSecond line"), None, None),
+            "First line"
+        );
+        assert_eq!(
+            crate::post_title_or_fallback("   ", None, None, Some("<p>Body title</p>")),
+            "Body title"
+        );
+        assert_eq!(
+            crate::post_title_or_fallback("   ", None, None, None),
+            "[no title]"
+        );
+    }
+
+    #[test]
+    fn derived_post_titles_are_capped_at_eighty_characters() {
+        let source = "1234567890".repeat(9);
+        let title = crate::post_title_or_fallback("", Some(&source), None, None);
+
+        assert_eq!(title.chars().count(), 80);
+        assert_eq!(title, "1234567890".repeat(8));
+    }
+
+    #[test]
+    fn clean_html_removes_scriptable_content() {
+        let html = crate::clean_html(
+            r#"<p onclick="alert(1)">ok<script>alert(1)</script><a href="javascript:alert(1)">bad</a></p>"#,
+            crate::ImageHandling::Preserve,
+        );
+
+        assert!(html.contains("ok"));
+        assert!(html.contains("bad"));
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("onclick"));
+        assert!(!html.contains("javascript:"));
+    }
+
+    #[test]
+    fn clean_html_can_remove_images_entirely() {
+        let html = crate::clean_html(
+            r#"<p>before<img src="https://example.com/image.jpg" alt="good">after</p>"#,
+            crate::ImageHandling::Remove,
+        );
+
+        assert!(html.contains("before"));
+        assert!(html.contains("after"));
+        assert!(!html.contains("<img"));
+        assert!(!html.contains("image.jpg"));
+    }
+
+    #[test]
+    fn clean_html_converts_safe_images_to_ugc_links() {
+        let html = crate::clean_html(
+            r#"<p><img src="javascript:alert(1)" alt="bad"><img src="https://example.com/image.jpg" alt="good"></p>"#,
+            crate::ImageHandling::ConvertToLinks,
+        );
+
+        assert!(!html.contains("javascript:"));
+        assert!(html.contains("href=\"https://example.com/image.jpg\""));
+        assert!(html.contains("rel=\"ugc noopener\""));
+        assert!(html.contains(">good<"));
+    }
+
+    #[test]
+    fn task_cleanup_migration_uses_transaction_safe_partial_indexes() {
+        assert!(TASK_CLEANUP_UP.contains("CREATE INDEX IF NOT EXISTS task_completed_cleanup_idx"));
+        assert!(TASK_CLEANUP_UP.contains("WHERE state='completed'"));
+        assert!(TASK_CLEANUP_UP.contains("CREATE INDEX IF NOT EXISTS task_failed_cleanup_idx"));
+        assert!(TASK_CLEANUP_UP.contains("WHERE state='failed'"));
+        assert!(!TASK_CLEANUP_UP.contains("CONCURRENTLY"));
+
+        assert!(TASK_CLEANUP_DOWN.contains("DROP INDEX IF EXISTS task_failed_cleanup_idx"));
+        assert!(TASK_CLEANUP_DOWN.contains("DROP INDEX IF EXISTS task_completed_cleanup_idx"));
+        assert!(!TASK_CLEANUP_DOWN.contains("CONCURRENTLY"));
+    }
+
+    #[test]
+    fn featured_task_dedupe_migration_indexes_active_tasks_and_local_follows() {
+        assert!(FEATURED_DEDUPE_UP.contains("task_active_featured_community_idx"));
+        assert!(FEATURED_DEDUPE_UP.contains("params->>'community_id'"));
+        assert!(FEATURED_DEDUPE_UP.contains("kind='fetch_community_featured'"));
+        assert!(FEATURED_DEDUPE_UP.contains("state IN ('pending', 'running')"));
+        assert!(FEATURED_DEDUPE_UP.contains("community_follow_local_community_idx"));
+        assert!(FEATURED_DEDUPE_UP.contains("WHERE local"));
+        assert!(!FEATURED_DEDUPE_UP.contains("CONCURRENTLY"));
+
+        assert!(
+            FEATURED_DEDUPE_DOWN
+                .contains("DROP INDEX IF EXISTS community_follow_local_community_idx")
+        );
+        assert!(
+            FEATURED_DEDUPE_DOWN
+                .contains("DROP INDEX IF EXISTS task_active_featured_community_idx")
+        );
+    }
+
+    #[test]
+    fn person_cleanup_migration_indexes_known_person_foreign_keys() {
+        for index_name in [
+            "community_created_by_idx",
+            "flag_person_idx",
+            "forgot_password_key_person_idx",
+            "invitation_created_by_idx",
+            "invitation_used_by_idx",
+            "local_community_follow_undo_follower_idx",
+            "local_post_like_undo_person_idx",
+            "local_reply_like_undo_person_idx",
+            "login_person_idx",
+            "media_person_idx",
+            "modlog_event_by_person_idx",
+            "modlog_event_person_idx",
+            "person_note_target_idx",
+            "poll_vote_person_idx",
+            "post_mention_person_idx",
+            "reply_mention_person_idx",
+        ] {
+            assert!(PERSON_CLEANUP_FK_UP.contains(index_name));
+            assert!(PERSON_CLEANUP_FK_DOWN.contains(index_name));
+        }
+
+        assert!(!PERSON_CLEANUP_FK_UP.contains("CONCURRENTLY"));
+    }
+
+    #[test]
+    fn outbox_fetch_dedupe_migration_indexes_active_outbox_tasks() {
+        assert!(OUTBOX_FETCH_DEDUPE_UP.contains("task_active_outbox_community_idx"));
+        assert!(OUTBOX_FETCH_DEDUPE_UP.contains("params->>'community_id'"));
+        assert!(OUTBOX_FETCH_DEDUPE_UP.contains("kind='fetch_community_outbox'"));
+        assert!(OUTBOX_FETCH_DEDUPE_UP.contains("state IN ('pending', 'running')"));
+        assert!(!OUTBOX_FETCH_DEDUPE_UP.contains("CONCURRENTLY"));
+
+        assert!(
+            OUTBOX_FETCH_DEDUPE_DOWN
+                .contains("DROP INDEX IF EXISTS task_active_outbox_community_idx")
+        );
+    }
+
+    #[test]
+    fn community_maintenance_migration_indexes_list_and_cleanup_queries() {
+        for index_name in [
+            "post_community_created_not_deleted_idx",
+            "post_remote_cleanup_idx",
+            "reply_local_post_idx",
+            "community_follow_active_remote_idx",
+        ] {
+            assert!(COMMUNITY_MAINTENANCE_UP.contains(index_name));
+            assert!(COMMUNITY_MAINTENANCE_DOWN.contains(index_name));
+        }
+
+        assert!(COMMUNITY_MAINTENANCE_UP.contains("WHERE approved AND NOT deleted"));
+        assert!(COMMUNITY_MAINTENANCE_UP.contains("WHERE NOT local AND NOT deleted"));
+        assert!(!COMMUNITY_MAINTENANCE_UP.contains("CONCURRENTLY"));
+    }
+
+    #[test]
+    fn actor_target_profile_migration_keeps_heuristic_evidence() {
+        assert!(ACTOR_TARGET_PROFILE_UP.contains("actor_ap_id TEXT PRIMARY KEY"));
+        assert!(ACTOR_TARGET_PROFILE_UP.contains("evidence JSONB"));
+        assert!(ACTOR_TARGET_PROFILE_UP.contains("observed_object_types TEXT[]"));
+        assert!(ACTOR_TARGET_PROFILE_UP.contains("observed_activity_types TEXT[]"));
+        assert!(ACTOR_TARGET_PROFILE_UP.contains("actor_target_profile_target_idx"));
+        assert!(!ACTOR_TARGET_PROFILE_UP.contains("CONCURRENTLY"));
+
+        assert!(ACTOR_TARGET_PROFILE_DOWN.contains("DROP TABLE actor_target_profile"));
+    }
+
+    #[test]
+    fn discovery_active_communities_migration_keeps_only_working_active_rows() {
+        assert!(DISCOVERY_ACTIVE_COMMUNITIES_UP.contains("remote_post_count BIGINT"));
+        assert!(DISCOVERY_ACTIVE_COMMUNITIES_UP.contains("remote_post_count > 0"));
+        assert!(DISCOVERY_ACTIVE_COMMUNITIES_UP.contains("suppressed_reason IS NOT NULL"));
+        assert!(
+            DISCOVERY_ACTIVE_COMMUNITIES_UP.contains("OR NOT community_discovery_server.active")
+        );
+        assert!(DISCOVERY_ACTIVE_COMMUNITIES_UP.contains("community_follow.local"));
+        assert!(DISCOVERY_ACTIVE_COMMUNITIES_UP.contains("SELECT 1 FROM post"));
+        assert!(DISCOVERY_ACTIVE_COMMUNITIES_UP.contains("WHERE post.community=community.id"));
+        assert!(!DISCOVERY_ACTIVE_COMMUNITIES_UP.contains("CONCURRENTLY"));
+
+        assert!(DISCOVERY_ACTIVE_COMMUNITIES_DOWN.contains("DROP COLUMN remote_post_count"));
+        assert!(
+            DISCOVERY_ACTIVE_COMMUNITIES_DOWN
+                .contains("DROP INDEX IF EXISTS community_discovery_active_post_count_idx")
+        );
+    }
+
+    #[test]
+    fn broad_community_discovery_migration_requires_more_than_one_post() {
+        assert!(BROAD_COMMUNITY_DISCOVERY_UP.contains("COALESCE(remote_post_count, 0) < 2"));
+        assert!(BROAD_COMMUNITY_DISCOVERY_UP.contains("WHERE active AND remote_post_count >= 2"));
+        assert!(
+            BROAD_COMMUNITY_DISCOVERY_UP.contains("WHERE community_follow.community=community.id")
+        );
+        assert!(BROAD_COMMUNITY_DISCOVERY_UP.contains("SELECT 1 FROM post"));
+        assert!(!BROAD_COMMUNITY_DISCOVERY_UP.contains("CONCURRENTLY"));
+
+        assert!(BROAD_COMMUNITY_DISCOVERY_DOWN.contains("WHERE active AND remote_post_count > 0"));
+    }
+
+    #[test]
+    fn known_defederated_host_migration_suppresses_only_tested_blocks() {
+        assert!(KNOWN_DEFEDERATED_HOST_SUPPRESSION_UP.contains("programming.dev"));
+        assert!(KNOWN_DEFEDERATED_HOST_SUPPRESSION_UP.contains("lemmy.blahaj.zone"));
+        assert!(KNOWN_DEFEDERATED_HOST_SUPPRESSION_UP.contains("lemmy.dbzer0.com"));
+        assert!(KNOWN_DEFEDERATED_HOST_SUPPRESSION_UP.contains("Known domain block"));
+        assert!(KNOWN_DEFEDERATED_HOST_SUPPRESSION_UP.contains("UPDATE community_discovery"));
+        assert!(!KNOWN_DEFEDERATED_HOST_SUPPRESSION_UP.contains("'lemmy.linuxuserspace.show'"));
+
+        assert!(
+            KNOWN_DEFEDERATED_HOST_SUPPRESSION_DOWN
+                .contains("suppressed_reason LIKE 'Known domain block:%'")
+        );
+    }
+
+    #[test]
+    fn ambiguous_domain_block_migration_clears_weak_suppressions() {
+        assert!(!RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("ILIKE '%Domain%blocked%'"));
+        assert!(
+            RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("Error in remote response:")
+        );
+        assert!(
+            RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP
+                .contains("Domain[[:space:]]+[^[:space:]]+[[:space:]]+is")
+        );
+        assert!(RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("lemmy.blahaj.zone"));
+        assert!(RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("lemmy.dbzer0.com"));
+        assert!(RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("suppressed_reason=NULL"));
+        assert!(
+            RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("interaction_probe_checked_at=NULL")
+        );
+        assert!(
+            RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP
+                .contains("community_server_visibility_suppression")
+        );
+        assert!(
+            RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("community_user_visibility_suppression")
+        );
+        assert!(RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("remote_post_count, 0) >= 2"));
+
+        assert!(RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_DOWN.contains("intentionally not reversible"));
+    }
+
+    #[test]
+    fn prune_cross_host_discovery_migration_deactivates_bad_rows() {
+        assert!(PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_UP.contains("community_discovery"));
+        assert!(PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_UP.contains("regexp_replace"));
+        assert!(PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_UP.contains("IS DISTINCT FROM"));
+        assert!(PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_UP.contains("remote_post_count, 0) < 2"));
+        assert!(PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_UP.contains("DELETE FROM community"));
+        assert!(PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_UP.contains("community_follow.local"));
+        assert!(PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_UP.contains("SELECT 1 FROM post"));
+        assert!(!PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_UP.contains("CONCURRENTLY"));
+
+        assert!(PRUNE_CROSS_HOST_COMMUNITY_DISCOVERY_DOWN.contains("intentionally not reversible"));
+    }
+
+    #[test]
+    fn host_interaction_probe_migration_tracks_empirical_like_tests() {
+        assert!(HOST_INTERACTION_PROBES_UP.contains("interaction_probe_checked_at"));
+        assert!(HOST_INTERACTION_PROBES_UP.contains("interaction_probe_success_at"));
+        assert!(HOST_INTERACTION_PROBES_UP.contains("interaction_probe_latest_error"));
+        assert!(!HOST_INTERACTION_PROBES_UP.contains("CONCURRENTLY"));
+
+        assert!(HOST_INTERACTION_PROBES_DOWN.contains("DROP COLUMN interaction_probe_checked_at"));
+        assert!(HOST_INTERACTION_PROBES_DOWN.contains("DROP COLUMN interaction_probe_success_at"));
+        assert!(
+            HOST_INTERACTION_PROBES_DOWN.contains("DROP COLUMN interaction_probe_latest_error")
+        );
+    }
+
+    #[test]
+    fn site_logo_migration_stores_uploaded_or_external_logo_urls() {
+        assert!(SITE_LOGO_UP.contains("ADD COLUMN site_logo TEXT"));
+        assert!(SITE_LOGO_UP.contains("site_logo_href_scheme"));
+        assert!(SITE_LOGO_UP.contains("local-media://%"));
+        assert!(SITE_LOGO_UP.contains("https://%"));
+        assert!(SITE_LOGO_UP.contains("http://%"));
+        assert!(!SITE_LOGO_UP.contains("CONCURRENTLY"));
+
+        assert!(SITE_LOGO_DOWN.contains("DROP CONSTRAINT site_logo_href_scheme"));
+        assert!(SITE_LOGO_DOWN.contains("DROP COLUMN site_logo"));
+    }
+
+    #[test]
+    fn site_css_migration_stores_uploaded_local_stylesheets() {
+        assert!(SITE_CSS_UP.contains("ADD COLUMN site_css TEXT"));
+        assert!(SITE_CSS_UP.contains("site_css_href_scheme"));
+        assert!(SITE_CSS_UP.contains("local-media://%"));
+        assert!(!SITE_CSS_UP.contains("https://%"));
+        assert!(!SITE_CSS_UP.contains("CONCURRENTLY"));
+
+        assert!(SITE_CSS_DOWN.contains("DROP CONSTRAINT site_css_href_scheme"));
+        assert!(SITE_CSS_DOWN.contains("DROP COLUMN site_css"));
+    }
+
+    #[test]
+    fn collection_targets_migration_models_non_group_targets() {
+        assert!(COLLECTION_TARGETS_UP.contains("CREATE TABLE collection_target"));
+        assert!(COLLECTION_TARGETS_UP.contains("target_kind TEXT NOT NULL"));
+        assert!(COLLECTION_TARGETS_UP.contains("owner_actor BIGINT REFERENCES person"));
+        assert!(COLLECTION_TARGETS_UP.contains("owner_inbox TEXT"));
+        assert!(COLLECTION_TARGETS_UP.contains("owner_shared_inbox TEXT"));
+        assert!(COLLECTION_TARGETS_UP.contains("CREATE TABLE collection_target_follow"));
+        assert!(COLLECTION_TARGETS_UP.contains("local_collection_target_follow_undo"));
+        assert!(!COLLECTION_TARGETS_UP.contains("CONCURRENTLY"));
+
+        assert!(COLLECTION_TARGETS_DOWN.contains("DROP TABLE collection_target_follow"));
+        assert!(COLLECTION_TARGETS_DOWN.contains("DROP TABLE collection_target"));
+    }
+
+    #[test]
+    fn follow_federation_status_migration_tracks_active_and_undo_delivery() {
+        assert!(FOLLOW_FEDERATION_STATUS_UP.contains("ALTER TABLE community_follow"));
+        assert!(FOLLOW_FEDERATION_STATUS_UP.contains("ALTER TABLE collection_target_follow"));
+        assert!(FOLLOW_FEDERATION_STATUS_UP.contains("local_community_follow_undo"));
+        assert!(FOLLOW_FEDERATION_STATUS_UP.contains("local_collection_target_follow_undo"));
+        assert!(FOLLOW_FEDERATION_STATUS_UP.contains("created_at timestamp with time zone"));
+        assert!(FOLLOW_FEDERATION_STATUS_UP.contains("federation_sent_at"));
+        assert!(FOLLOW_FEDERATION_STATUS_UP.contains("federation_received_at"));
+        assert!(!FOLLOW_FEDERATION_STATUS_UP.contains("CONCURRENTLY"));
+
+        assert!(FOLLOW_FEDERATION_STATUS_DOWN.contains("DROP COLUMN created_at"));
+        assert!(FOLLOW_FEDERATION_STATUS_DOWN.contains("DROP COLUMN federation_sent_at"));
+        assert!(FOLLOW_FEDERATION_STATUS_DOWN.contains("DROP COLUMN federation_received_at"));
+    }
+
+    #[test]
+    fn like_activity_instance_ids_migration_tracks_undo_like_ids() {
+        assert!(LIKE_ACTIVITY_INSTANCE_IDS_UP.contains("ALTER TABLE local_post_like_undo"));
+        assert!(LIKE_ACTIVITY_INSTANCE_IDS_UP.contains("ALTER TABLE local_reply_like_undo"));
+        assert!(LIKE_ACTIVITY_INSTANCE_IDS_UP.contains("ADD COLUMN like_ap_id TEXT"));
+        assert!(!LIKE_ACTIVITY_INSTANCE_IDS_UP.contains("CONCURRENTLY"));
+
+        assert!(LIKE_ACTIVITY_INSTANCE_IDS_DOWN.contains("ALTER TABLE local_reply_like_undo"));
+        assert!(LIKE_ACTIVITY_INSTANCE_IDS_DOWN.contains("ALTER TABLE local_post_like_undo"));
+        assert!(LIKE_ACTIVITY_INSTANCE_IDS_DOWN.contains("DROP COLUMN like_ap_id"));
+    }
+
+    #[test]
+    fn user_follow_federation_status_migration_tracks_accepts_and_undos() {
+        assert!(USER_FOLLOW_FEDERATION_STATUS_UP.contains("ALTER TABLE person_follow"));
+        assert!(USER_FOLLOW_FEDERATION_STATUS_UP.contains("ALTER TABLE local_user_follow_undo"));
+        assert!(USER_FOLLOW_FEDERATION_STATUS_UP.contains("created_at timestamp with time zone"));
+        assert!(USER_FOLLOW_FEDERATION_STATUS_UP.contains("federation_sent_at"));
+        assert!(USER_FOLLOW_FEDERATION_STATUS_UP.contains("federation_received_at"));
+        assert!(!USER_FOLLOW_FEDERATION_STATUS_UP.contains("CONCURRENTLY"));
+
+        assert!(USER_FOLLOW_FEDERATION_STATUS_DOWN.contains("ALTER TABLE local_user_follow_undo"));
+        assert!(USER_FOLLOW_FEDERATION_STATUS_DOWN.contains("ALTER TABLE person_follow"));
+        assert!(USER_FOLLOW_FEDERATION_STATUS_DOWN.contains("DROP COLUMN created_at"));
+        assert!(USER_FOLLOW_FEDERATION_STATUS_DOWN.contains("DROP COLUMN federation_sent_at"));
+        assert!(USER_FOLLOW_FEDERATION_STATUS_DOWN.contains("DROP COLUMN federation_received_at"));
+    }
+
+    #[test]
+    fn federation_event_ledger_migration_keeps_compact_trace_metadata() {
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("CREATE TABLE federation_event"));
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("direction TEXT NOT NULL"));
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("action TEXT NOT NULL"));
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("status TEXT NOT NULL"));
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("actor_ap_id TEXT"));
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("object_ap_id TEXT"));
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("target_ap_id TEXT"));
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("error_class TEXT"));
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("error_text TEXT"));
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("federation_event_host_created_idx"));
+        assert!(FEDERATION_EVENT_LEDGER_UP.contains("federation_event_action_status_created_idx"));
+        assert!(!FEDERATION_EVENT_LEDGER_UP.contains("raw_payload"));
+        assert!(!FEDERATION_EVENT_LEDGER_UP.contains("payload json"));
+        assert!(!FEDERATION_EVENT_LEDGER_UP.contains("payload text"));
+        assert!(!FEDERATION_EVENT_LEDGER_UP.contains("CONCURRENTLY"));
+
+        assert!(FEDERATION_EVENT_LEDGER_DOWN.contains("DROP TABLE federation_event"));
+    }
+
+    #[test]
+    fn user_follow_notification_migration_tracks_notification_actor() {
+        assert!(USER_FOLLOW_NOTIFICATIONS_UP.contains("ADD COLUMN from_user"));
+        assert!(USER_FOLLOW_NOTIFICATIONS_UP.contains("REFERENCES person ON DELETE SET NULL"));
+        assert!(USER_FOLLOW_NOTIFICATIONS_UP.contains("notification_from_user_idx"));
+        assert!(!USER_FOLLOW_NOTIFICATIONS_UP.contains("CONCURRENTLY"));
+
+        assert!(USER_FOLLOW_NOTIFICATIONS_DOWN.contains("DROP COLUMN from_user"));
+        assert!(
+            USER_FOLLOW_NOTIFICATIONS_DOWN
+                .contains("DROP INDEX IF EXISTS notification_from_user_idx")
+        );
+    }
+
+    #[test]
+    fn admin_cleanup_host_profile_migration_adds_operator_controls() {
+        assert!(ADMIN_CLEANUP_HOST_PROFILES_UP.contains("cleanup_notifications_enabled"));
+        assert!(ADMIN_CLEANUP_HOST_PROFILES_UP.contains("cleanup_notification_retention_days"));
+        assert!(
+            ADMIN_CLEANUP_HOST_PROFILES_UP.contains("cleanup_failed_inbox_task_payloads_enabled")
+        );
+        assert!(
+            ADMIN_CLEANUP_HOST_PROFILES_UP
+                .contains("cleanup_failed_inbox_task_payload_retention_days")
+        );
+        assert!(ADMIN_CLEANUP_HOST_PROFILES_UP.contains("notification_cleanup_idx"));
+        assert!(ADMIN_CLEANUP_HOST_PROFILES_UP.contains("actor_target_profile_host_updated_idx"));
+        assert!(
+            ADMIN_CLEANUP_HOST_PROFILES_UP.contains("federation_event_host_status_created_idx")
+        );
+        assert!(!ADMIN_CLEANUP_HOST_PROFILES_UP.contains("CONCURRENTLY"));
+
+        assert!(
+            ADMIN_CLEANUP_HOST_PROFILES_DOWN.contains("DROP COLUMN cleanup_notifications_enabled")
+        );
+        assert!(
+            ADMIN_CLEANUP_HOST_PROFILES_DOWN
+                .contains("DROP INDEX IF EXISTS actor_target_profile_host_updated_idx")
+        );
+    }
 }

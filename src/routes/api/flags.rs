@@ -1,3 +1,4 @@
+use crate::hyper;
 use crate::lang;
 use crate::types::{
     CommunityLocalID, FlagLocalID, ImageHandling, JustContentText, PostLocalID, RespAvatarInfo,
@@ -9,7 +10,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 async fn route_unstable_flags_list(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
@@ -199,6 +200,7 @@ async fn route_unstable_flags_list(
                             },
                             your_vote: None,
                             relevance: None,
+                            federation_status: None,
                             community: Cow::Owned(community),
                         };
 
@@ -283,7 +285,7 @@ async fn route_unstable_flags_edit(
         community_dismissed: Option<bool>,
     }
 
-    let body = hyper::body::to_bytes(req.into_body()).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
 
     let body: Body = serde_json::from_slice(&body)?;
 
@@ -329,7 +331,7 @@ async fn route_unstable_flags_edit(
                     }
                 }
             }
-        }?
+        }?;
     }
 
     {

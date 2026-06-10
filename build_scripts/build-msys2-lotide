@@ -1,0 +1,577 @@
+#!/usr/bin/env bash
+#
+# Project: Lotide Windows/MSYS2 Build Support
+# -------------------------------------------
+#
+# File: build-msys2-lotide
+#
+# Purpose:
+#
+#     Build Lotide and Hitide from MSYS2, Cygwin, or Linux-like shells, and
+#     optionally create a disposable local PostgreSQL-backed instance for a
+#     smoke test.
+#
+# Responsibilities:
+#
+#     - install MSYS2 build and PostgreSQL packages when requested
+#     - build Lotide and Hitide release binaries with cargo
+#     - initialize a local PostgreSQL data directory for development
+#     - run migrations and start both services long enough to prove they work
+#
+# This file intentionally does NOT contain:
+#
+#     - production secrets
+#     - Windows service installation
+#     - reverse proxy configuration
+#     - live federation setup
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DEFAULT_HITIDE_DIR="${REPO_ROOT}/../hitide"
+
+if [[ ! -f "${DEFAULT_HITIDE_DIR}/Cargo.toml" && -f "${REPO_ROOT}/../server_hitide/Cargo.toml" ]]; then
+    DEFAULT_HITIDE_DIR="${REPO_ROOT}/../server_hitide"
+fi
+
+LOTIDE_DIR="${LOTIDE_DIR:-${REPO_ROOT}}"
+HITIDE_DIR="${HITIDE_DIR:-${DEFAULT_HITIDE_DIR}}"
+STATE_DIR="${LOTIDE_WINDOWS_STATE_DIR:-${REPO_ROOT}/.local/msys2-lotide}"
+PGDATA_DIR="${LOTIDE_WINDOWS_PGDATA:-${STATE_DIR}/postgres-data}"
+MEDIA_DIR="${LOTIDE_WINDOWS_MEDIA_DIR:-${STATE_DIR}/media}"
+LOG_DIR="${LOTIDE_WINDOWS_LOG_DIR:-${STATE_DIR}/log}"
+RUN_DIR="${LOTIDE_WINDOWS_RUN_DIR:-${STATE_DIR}/run}"
+
+PGPORT="${LOTIDE_WINDOWS_PGPORT:-55432}"
+LOTIDE_PORT="${LOTIDE_WINDOWS_LOTIDE_PORT:-3333}"
+HITIDE_PORT="${LOTIDE_WINDOWS_HITIDE_PORT:-4333}"
+DB_NAME="${LOTIDE_WINDOWS_DB_NAME:-lotide_windows}"
+DB_USER="${LOTIDE_WINDOWS_DB_USER:-lotide}"
+DB_PASSWORD="${LOTIDE_WINDOWS_DB_PASSWORD:-lotide}"
+PG_SUPERUSER="${LOTIDE_WINDOWS_PG_SUPERUSER:-${USER:-$(id -un)}}"
+CYGWIN_MIRROR="${LOTIDE_CYGWIN_MIRROR:-https://mirrors.kernel.org/sourceware/cygwin/}"
+
+INSTALL_DEPS=0
+BUILD_RELEASE=1
+SETUP_LOCAL_DB=0
+RUN_SMOKE_TEST=0
+START_LOCAL_SERVICES=0
+
+info() {
+    printf '==> %s\n' "$*"
+}
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  build_scripts/build-msys2-lotide [options]
+
+Options:
+  --install-deps       Install MSYS2 packages needed to build and run locally.
+  --build-only         Build Lotide and Hitide release binaries. This is the default.
+  --setup-local-db     Initialize/start local PostgreSQL and run Lotide migrations.
+  --smoke-test         Build, set up local PostgreSQL, start Lotide and Hitide,
+                       request both HTTP endpoints, then stop the services.
+  --start-local        Build, set up local PostgreSQL, and start Lotide and Hitide.
+                       This leaves the local services running until interrupted.
+  --no-build           Skip cargo build. Useful after a successful build.
+  --help               Show this help.
+
+Environment:
+  LOTIDE_WINDOWS_STATE_DIR   Local state directory. Default: .local/msys2-lotide
+  LOTIDE_WINDOWS_PGPORT      Local PostgreSQL port. Default: 55432
+  LOTIDE_WINDOWS_LOTIDE_PORT Local Lotide port. Default: 3333
+  LOTIDE_WINDOWS_HITIDE_PORT Local Hitide port. Default: 4333
+  LOTIDE_WINDOWS_DB_NAME     Local database name. Default: lotide_windows
+  LOTIDE_WINDOWS_DB_USER     Local database role. Default: lotide
+  LOTIDE_WINDOWS_DB_PASSWORD Local database password. Default: lotide
+  LOTIDE_WINDOWS_PG_SUPERUSER PostgreSQL bootstrap user. Default: current user
+  LOTIDE_CYGWIN_MIRROR       Cygwin package mirror used by --install-deps.
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --install-deps)
+            INSTALL_DEPS=1
+            ;;
+        --build-only)
+            BUILD_RELEASE=1
+            ;;
+        --setup-local-db)
+            SETUP_LOCAL_DB=1
+            ;;
+        --smoke-test)
+            SETUP_LOCAL_DB=1
+            RUN_SMOKE_TEST=1
+            ;;
+        --start-local)
+            SETUP_LOCAL_DB=1
+            START_LOCAL_SERVICES=1
+            ;;
+        --no-build)
+            BUILD_RELEASE=0
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            die "unknown option: $1"
+            ;;
+    esac
+    shift
+done
+
+system_name() {
+    uname -s 2>/dev/null || printf 'unknown'
+}
+
+is_msys2() {
+    case "${MSYSTEM:-}:$(system_name)" in
+        MINGW*:*) return 0 ;;
+        UCRT*:*) return 0 ;;
+        CLANG*:*) return 0 ;;
+        MSYS*:*) return 0 ;;
+        *:MSYS_NT*) return 0 ;;
+        *:MINGW*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_cygwin() {
+    case "$(system_name)" in
+        CYGWIN*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+is_windows_shell() {
+    is_msys2 || is_cygwin
+}
+
+exe_suffix() {
+    if is_windows_shell; then
+        printf '.exe'
+    fi
+}
+
+native_path() {
+    if is_windows_shell && command -v cygpath >/dev/null 2>&1; then
+        cygpath -w "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+msys2_package_prefix() {
+    if [ -n "${MINGW_PACKAGE_PREFIX:-}" ]; then
+        printf '%s\n' "${MINGW_PACKAGE_PREFIX}"
+        return
+    fi
+
+    case "${MSYSTEM:-UCRT64}" in
+        UCRT64) printf 'mingw-w64-ucrt-x86_64\n' ;;
+        MINGW64) printf 'mingw-w64-x86_64\n' ;;
+        CLANG64) printf 'mingw-w64-clang-x86_64\n' ;;
+        CLANGARM64) printf 'mingw-w64-clang-aarch64\n' ;;
+        MINGW32) printf 'mingw-w64-i686\n' ;;
+        *)
+            die "unsupported MSYS2 environment: ${MSYSTEM:-unset}; run from UCRT64 or MINGW64"
+            ;;
+    esac
+}
+
+install_msys2_packages() {
+    command -v pacman >/dev/null 2>&1 || die "pacman was not found; run this inside MSYS2"
+
+    local prefix
+    prefix="$(msys2_package_prefix)"
+
+    info "Installing MSYS2 build and runtime packages using prefix ${prefix}"
+    pacman -Sy --needed --noconfirm \
+        base-devel \
+        curl \
+        git \
+        make \
+        "${prefix}-gcc" \
+        "${prefix}-openssl" \
+        "${prefix}-pkgconf" \
+        "${prefix}-postgresql" \
+        "${prefix}-rust"
+}
+
+install_cygwin_packages() {
+    local setup_exe native_setup_exe curl_path
+
+    if command -v setup-x86_64.exe >/dev/null 2>&1; then
+        setup_exe="$(command -v setup-x86_64.exe)"
+    else
+        mkdir -p "${STATE_DIR}"
+        setup_exe="${STATE_DIR}/setup-x86_64.exe"
+
+        if [ ! -x "${setup_exe}" ]; then
+            info "Downloading Cygwin package setup tool"
+            curl_path="$(command -v curl 2>/dev/null || true)"
+            if [ -n "${curl_path}" ] && ! { is_cygwin && [ "${curl_path#/cygdrive/}" != "${curl_path}" ]; }; then
+                curl -fL "https://cygwin.com/setup-x86_64.exe" -o "${setup_exe}"
+            elif command -v powershell.exe >/dev/null 2>&1; then
+                native_setup_exe="$(native_path "${setup_exe}")"
+                powershell.exe -NoProfile -ExecutionPolicy Bypass \
+                    -Command "Invoke-WebRequest -UseBasicParsing -Uri 'https://cygwin.com/setup-x86_64.exe' -OutFile '${native_setup_exe}'"
+            else
+                die "setup-x86_64.exe was not found and no downloader is available"
+            fi
+            chmod +x "${setup_exe}"
+        fi
+    fi
+
+    info "Installing Cygwin build and PostgreSQL packages"
+    "${setup_exe}" -q -s "${CYGWIN_MIRROR}" -P \
+        curl,git,make,gcc-core,gcc-g++,libssl-devel,pkg-config,rust,rustc,cargo,rustfmt,rust-clippy,postgresql,postgresql-client
+}
+
+install_dependencies() {
+    if is_msys2; then
+        install_msys2_packages
+    elif is_cygwin; then
+        install_cygwin_packages
+    elif [ -x "${LOTIDE_DIR}/build_scripts/debian-build-lotide.sh" ]; then
+        info "Linux detected; use the Debian build scripts for package installation"
+        "${LOTIDE_DIR}/build_scripts/debian-build-lotide.sh"
+        "${HITIDE_DIR}/build_scripts/debian-build-hitide.sh"
+        BUILD_RELEASE=0
+    else
+        die "automatic dependency installation is only implemented for MSYS2, Cygwin, and Debian-like Linux"
+    fi
+}
+
+prepare_path() {
+    if is_msys2; then
+        case "${MSYSTEM:-UCRT64}" in
+            UCRT64) export PATH="/ucrt64/bin:/usr/bin:${PATH}" ;;
+            MINGW64) export PATH="/mingw64/bin:/usr/bin:${PATH}" ;;
+            CLANG64) export PATH="/clang64/bin:/usr/bin:${PATH}" ;;
+            CLANGARM64) export PATH="/clangarm64/bin:/usr/bin:${PATH}" ;;
+            MINGW32) export PATH="/mingw32/bin:/usr/bin:${PATH}" ;;
+            *) export PATH="/ucrt64/bin:/usr/bin:${PATH}" ;;
+        esac
+    elif is_cygwin; then
+        export PATH="/usr/sbin:/usr/bin:${PATH}"
+    fi
+}
+
+require_tool() {
+    command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"
+}
+
+configure_cargo() {
+    prepare_path
+    require_tool cargo
+    require_tool rustc
+
+    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
+    export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+
+    if [ -z "${RUSTFLAGS:-}" ]; then
+        export RUSTFLAGS="-C debuginfo=0"
+    fi
+}
+
+cargo_ignore_rust_version_flag() {
+    # Cygwin's packaged Rust can lag upstream by a patch release. The current
+    # AWS and web-push stack declares 1.91.1 while Cygwin ships 1.91.0, so this
+    # lets the actual compiler test decide whether the build is valid.
+    if [ "${LOTIDE_CARGO_IGNORE_RUST_VERSION:-}" = "1" ] || is_cygwin; then
+        printf '%s\n' "--ignore-rust-version"
+    fi
+}
+
+lotide_feature_flags() {
+    # Cygwin's crypto stack cannot currently build the AWS SDK TLS providers
+    # used by S3 media storage. Local media is enough for the development proof.
+    if is_cygwin && [ "${LOTIDE_CYGWIN_ENABLE_S3:-}" != "1" ]; then
+        printf '%s\n' "--no-default-features"
+    fi
+}
+
+build_release_binaries() {
+    local ignore_rust_version_flag lotide_features_flag
+    configure_cargo
+    ignore_rust_version_flag="$(cargo_ignore_rust_version_flag)"
+    lotide_features_flag="$(lotide_feature_flags)"
+
+    info "Building Lotide release binary"
+    (
+        cd "${LOTIDE_DIR}"
+        cargo build --release --bin lotide ${ignore_rust_version_flag} ${lotide_features_flag} -j "${CARGO_BUILD_JOBS}"
+    )
+
+    info "Building Hitide release binary"
+    (
+        cd "${HITIDE_DIR}"
+        cargo build --release --bin hitide ${ignore_rust_version_flag} -j "${CARGO_BUILD_JOBS}"
+    )
+}
+
+require_postgres_tools() {
+    prepare_path
+    require_tool initdb
+    require_tool pg_ctl
+    require_tool postgres
+    require_tool psql
+    require_tool createdb
+    require_tool pg_isready
+}
+
+sql_literal() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+}
+
+require_simple_identifier() {
+    case "$2" in
+        ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*)
+            die "$1 must contain only ASCII letters, digits, and underscores"
+            ;;
+        [0123456789]*)
+            die "$1 must not start with a digit"
+            ;;
+    esac
+
+    if [ "${#2}" -gt 63 ]; then
+        die "$1 must be 63 characters or shorter for PostgreSQL identifiers"
+    fi
+}
+
+postgres_is_running() {
+    pg_isready -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" >/dev/null 2>&1
+}
+
+init_local_postgres() {
+    require_postgres_tools
+    mkdir -p "${STATE_DIR}" "${LOG_DIR}" "${RUN_DIR}" "${MEDIA_DIR}"
+
+    if [ ! -s "${PGDATA_DIR}/PG_VERSION" ]; then
+        info "Initializing PostgreSQL data directory at ${PGDATA_DIR}"
+        initdb -D "${PGDATA_DIR}" --auth=trust --encoding=UTF8 --locale=C
+    fi
+
+    if ! postgres_is_running; then
+        info "Starting local PostgreSQL on 127.0.0.1:${PGPORT}"
+        pg_ctl \
+            -D "${PGDATA_DIR}" \
+            -l "${LOG_DIR}/postgres.log" \
+            -o "-h 127.0.0.1 -p ${PGPORT}" \
+            start \
+            -w
+    else
+        info "PostgreSQL is already listening on 127.0.0.1:${PGPORT}"
+    fi
+}
+
+ensure_local_database() {
+    local password_sql
+    require_simple_identifier "LOTIDE_WINDOWS_DB_USER" "${DB_USER}"
+    require_simple_identifier "LOTIDE_WINDOWS_DB_NAME" "${DB_NAME}"
+    password_sql="$(sql_literal "${DB_PASSWORD}")"
+
+    if ! psql -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -d postgres \
+        -tAc "SELECT 1 FROM pg_roles WHERE rolname = $(sql_literal "${DB_USER}")" |
+        grep -q 1; then
+        info "Creating PostgreSQL role ${DB_USER}"
+        psql -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -d postgres \
+            -c "CREATE ROLE \"${DB_USER}\" WITH LOGIN PASSWORD ${password_sql}"
+    fi
+
+    if ! psql -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -d postgres \
+        -tAc "SELECT 1 FROM pg_database WHERE datname = $(sql_literal "${DB_NAME}")" |
+        grep -q 1; then
+        info "Creating PostgreSQL database ${DB_NAME}"
+        createdb -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -O "${DB_USER}" "${DB_NAME}"
+    fi
+}
+
+write_env_files() {
+    local native_media
+    native_media="$(native_path "${MEDIA_DIR}")"
+
+    cat >"${RUN_DIR}/lotide.env" <<EOF
+DATABASE_URL='postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${PGPORT}/${DB_NAME}?sslmode=disable'
+HOST_URL_ACTIVITYPUB='http://127.0.0.1:${LOTIDE_PORT}/apub'
+HOST_URL_API='http://127.0.0.1:${LOTIDE_PORT}/api'
+BIND_ADDRESS='127.0.0.1'
+PORT='${LOTIDE_PORT}'
+APUB_PROXY_REWRITES='true'
+ALLOW_FORWARDED='true'
+DEV_MODE='true'
+MEDIA_STORAGE='local'
+MEDIA_LOCATION='${native_media}'
+SEPARATE_WORKER='true'
+RUST_LOG='lotide=info'
+EOF
+
+    cat >"${RUN_DIR}/hitide.env" <<EOF
+BACKEND_HOST='http://127.0.0.1:${LOTIDE_PORT}'
+FRONTEND_URL='http://127.0.0.1:${HITIDE_PORT}'
+BIND_ADDRESS='127.0.0.1'
+PORT='${HITIDE_PORT}'
+RUST_LOG='hitide=info'
+EOF
+}
+
+lotide_bin() {
+    printf '%s/target/release/lotide%s\n' "${LOTIDE_DIR}" "$(exe_suffix)"
+}
+
+hitide_bin() {
+    printf '%s/target/release/hitide%s\n' "${HITIDE_DIR}" "$(exe_suffix)"
+}
+
+run_lotide_migrations() {
+    local bin
+    bin="$(lotide_bin)"
+    [ -x "${bin}" ] || die "missing Lotide binary: ${bin}"
+
+    info "Running Lotide migration setup"
+    (
+        set -a
+        # shellcheck disable=SC1090
+        . "${RUN_DIR}/lotide.env"
+        set +a
+        cd "${LOTIDE_DIR}"
+        "${bin}" migrate setup
+        "${bin}" migrate
+    )
+}
+
+setup_local_database() {
+    init_local_postgres
+    ensure_local_database
+    write_env_files
+    run_lotide_migrations
+}
+
+wait_for_url() {
+    local url="$1"
+    local name="$2"
+    local attempt
+
+    for attempt in $(seq 1 60); do
+        if curl -fsS "${url}" >/dev/null 2>&1; then
+            info "${name} responded at ${url}"
+            return 0
+        fi
+        sleep 1
+    done
+
+    return 1
+}
+
+start_services() {
+    local lotide_bin_path hitide_bin_path lotide_pid hitide_pid
+    lotide_bin_path="$(lotide_bin)"
+    hitide_bin_path="$(hitide_bin)"
+
+    [ -x "${lotide_bin_path}" ] || die "missing Lotide binary: ${lotide_bin_path}"
+    [ -x "${hitide_bin_path}" ] || die "missing Hitide binary: ${hitide_bin_path}"
+
+    stop_services
+
+    info "Starting local Lotide on http://127.0.0.1:${LOTIDE_PORT}"
+    (
+        set -a
+        # shellcheck disable=SC1090
+        . "${RUN_DIR}/lotide.env"
+        set +a
+        cd "${LOTIDE_DIR}"
+        "${lotide_bin_path}"
+    ) >"${LOG_DIR}/lotide.log" 2>&1 &
+    lotide_pid=$!
+
+    info "Starting local Hitide on http://127.0.0.1:${HITIDE_PORT}"
+    (
+        set -a
+        # shellcheck disable=SC1090
+        . "${RUN_DIR}/hitide.env"
+        set +a
+        cd "${HITIDE_DIR}"
+        "${hitide_bin_path}"
+    ) >"${LOG_DIR}/hitide.log" 2>&1 &
+    hitide_pid=$!
+
+    printf '%s\n' "${lotide_pid}" >"${RUN_DIR}/lotide.pid"
+    printf '%s\n' "${hitide_pid}" >"${RUN_DIR}/hitide.pid"
+}
+
+stop_services() {
+    local pid_file pid
+
+    for pid_file in "${RUN_DIR}/hitide.pid" "${RUN_DIR}/lotide.pid"; do
+        if [ -s "${pid_file}" ]; then
+            pid="$(cat "${pid_file}")"
+            if kill -0 "${pid}" >/dev/null 2>&1; then
+                kill "${pid}" >/dev/null 2>&1 || true
+                wait "${pid}" 2>/dev/null || true
+            fi
+            rm -f "${pid_file}"
+        fi
+    done
+}
+
+run_smoke_test() {
+    start_services
+    trap stop_services EXIT
+
+    wait_for_url "http://127.0.0.1:${LOTIDE_PORT}/api/unstable/instance" "Lotide API" ||
+        die "Lotide did not respond; see ${LOG_DIR}/lotide.log"
+    wait_for_url "http://127.0.0.1:${HITIDE_PORT}/" "Hitide frontend" ||
+        die "Hitide did not respond; see ${LOG_DIR}/hitide.log"
+
+    info "Smoke test passed"
+    stop_services
+    trap - EXIT
+}
+
+if [ "${INSTALL_DEPS}" -eq 1 ]; then
+    install_dependencies
+fi
+
+if [ "${BUILD_RELEASE}" -eq 1 ]; then
+    build_release_binaries
+fi
+
+if [ "${SETUP_LOCAL_DB}" -eq 1 ]; then
+    setup_local_database
+fi
+
+if [ "${RUN_SMOKE_TEST}" -eq 1 ]; then
+    run_smoke_test
+elif [ "${START_LOCAL_SERVICES}" -eq 1 ]; then
+    start_services
+    cat <<EOF
+Lotide and Hitide are running locally.
+
+  Lotide API: http://127.0.0.1:${LOTIDE_PORT}/api/unstable/instance
+  Hitide UI : http://127.0.0.1:${HITIDE_PORT}/
+  Logs      : ${LOG_DIR}
+
+Stop them with:
+  kill \$(cat "${RUN_DIR}/hitide.pid") \$(cat "${RUN_DIR}/lotide.pid")
+EOF
+fi
+
+cat <<EOF
+Done.
+
+Lotide binary: $(lotide_bin)
+Hitide binary: $(hitide_bin)
+Local state  : ${STATE_DIR}
+EOF
+
+# end of build-msys2-lotide

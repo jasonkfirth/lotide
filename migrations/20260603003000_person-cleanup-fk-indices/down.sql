@@ -1,0 +1,16 @@
+DROP INDEX IF EXISTS reply_mention_person_idx;
+DROP INDEX IF EXISTS post_mention_person_idx;
+DROP INDEX IF EXISTS poll_vote_person_idx;
+DROP INDEX IF EXISTS person_note_target_idx;
+DROP INDEX IF EXISTS modlog_event_person_idx;
+DROP INDEX IF EXISTS modlog_event_by_person_idx;
+DROP INDEX IF EXISTS media_person_idx;
+DROP INDEX IF EXISTS login_person_idx;
+DROP INDEX IF EXISTS local_reply_like_undo_person_idx;
+DROP INDEX IF EXISTS local_post_like_undo_person_idx;
+DROP INDEX IF EXISTS local_community_follow_undo_follower_idx;
+DROP INDEX IF EXISTS invitation_used_by_idx;
+DROP INDEX IF EXISTS invitation_created_by_idx;
+DROP INDEX IF EXISTS forgot_password_key_person_idx;
+DROP INDEX IF EXISTS flag_person_idx;
+DROP INDEX IF EXISTS community_created_by_idx;

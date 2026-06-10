@@ -1,8 +1,14 @@
 use serde_derive::Deserialize;
 use std::collections::HashMap;
 
+use config::Format;
+
 fn default_port() -> u16 {
     3333
+}
+
+fn default_bind_address() -> std::net::IpAddr {
+    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
 }
 
 #[derive(Deserialize)]
@@ -16,6 +22,9 @@ pub struct Config {
     #[serde(default = "default_port")]
     pub port: u16,
 
+    #[serde(default = "default_bind_address")]
+    pub bind_address: std::net::IpAddr,
+
     #[serde(default)]
     pub apub_proxy_rewrites: bool,
     #[serde(default)]
@@ -26,9 +35,13 @@ pub struct Config {
     pub media_storage: Option<String>,
     pub media_location: Option<String>,
 
+    #[cfg_attr(not(feature = "s3-storage"), allow(dead_code))]
     pub media_s3_region: Option<String>,
+    #[cfg_attr(not(feature = "s3-storage"), allow(dead_code))]
     pub media_s3_endpoint: Option<String>,
+    #[cfg_attr(not(feature = "s3-storage"), allow(dead_code))]
     pub media_s3_access_key_id: Option<String>,
+    #[cfg_attr(not(feature = "s3-storage"), allow(dead_code))]
     pub media_s3_secret_key: Option<String>,
 
     pub smtp_url: Option<String>,
@@ -46,17 +59,17 @@ pub struct Config {
 
 impl Config {
     pub fn load(config_file_path: Option<&std::ffi::OsStr>) -> Result<Self, config::ConfigError> {
-        let mut src = config::Config::new()
-            .with_merged(config::Environment::new())?
-            .with_merged(config::Environment::with_prefix("LOTIDE"))?;
+        let mut src = config::Config::builder()
+            .add_source(config::Environment::default())
+            .add_source(config::Environment::with_prefix("LOTIDE"));
 
         if let Some(config_file_path) = config_file_path {
-            src.merge(SpecificFile {
+            src = src.add_source(SpecificFile {
                 path: config_file_path.into(),
-            })?;
+            });
         }
 
-        src.try_into()
+        src.build()?.try_deserialize()
     }
 }
 
@@ -79,7 +92,7 @@ impl config::Source for SpecificFile {
                 return Err(config::ConfigError::FileParse {
                     uri: Some(uri),
                     cause: Box::new(cause),
-                })
+                });
             }
         };
 

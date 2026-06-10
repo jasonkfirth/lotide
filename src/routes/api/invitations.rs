@@ -1,3 +1,4 @@
+use crate::hyper;
 use crate::lang;
 use crate::types::{
     InvitationsListQuery, RespAvatarInfo, RespInvitationInfo, RespList, RespMinimalAuthorInfo,
@@ -7,7 +8,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 async fn route_unstable_invitations_list(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
@@ -79,7 +80,7 @@ async fn route_unstable_invitations_list(
 }
 
 async fn route_unstable_invitations_create(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
@@ -99,15 +100,13 @@ async fn route_unstable_invitations_create(
         if row.get(1) {
             if row.get(0) {
                 Ok(())
+            } else if crate::is_site_admin(&db, user).await? {
+                Ok(())
             } else {
-                if crate::is_site_admin(&db, user).await? {
-                    Ok(())
-                } else {
-                    Err(crate::Error::UserError(crate::simple_response(
-                        hyper::StatusCode::FORBIDDEN,
-                        lang.tr(&lang::invitations_not_allowed()).into_owned(),
-                    )))
-                }
+                Err(crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::FORBIDDEN,
+                    lang.tr(&lang::invitations_not_allowed()).into_owned(),
+                )))
             }
         } else {
             Err(crate::Error::UserError(crate::simple_response(

@@ -1,0 +1,1194 @@
+#!/bin/bash
+#
+# Project: Lotide Haiku Build Support
+# -----------------------------------
+#
+# File: haiku_build_lotide
+#
+# Purpose:
+#
+#     Build Lotide and Hitide on Haiku, create a small local PostgreSQL-backed
+#     smoke-test instance, and package the release binaries as a Haiku package.
+#
+# Responsibilities:
+#
+#     - install Haiku build and PostgreSQL packages when requested
+#     - build Lotide and Hitide release binaries with cargo
+#     - initialize a local PostgreSQL data directory for development tests
+#     - create a Haiku package with runtime helper scripts
+#
+# This file intentionally does NOT contain:
+#
+#     - production secrets
+#     - reverse proxy configuration
+#     - live federation credentials
+#     - long-running service supervision
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+DEFAULT_HITIDE_DIR="${REPO_ROOT}/../hitide"
+
+if [[ ! -f "${DEFAULT_HITIDE_DIR}/Cargo.toml" && -f "${REPO_ROOT}/../server_hitide/Cargo.toml" ]]; then
+    DEFAULT_HITIDE_DIR="${REPO_ROOT}/../server_hitide"
+fi
+
+LOTIDE_DIR="${LOTIDE_DIR:-${REPO_ROOT}}"
+HITIDE_DIR="${HITIDE_DIR:-${DEFAULT_HITIDE_DIR}}"
+
+STATE_DIR="${LOTIDE_HAIKU_STATE_DIR:-${REPO_ROOT}/.local/haiku-lotide}"
+PGDATA_DIR="${LOTIDE_HAIKU_PGDATA:-${STATE_DIR}/postgres-data}"
+MEDIA_DIR="${LOTIDE_HAIKU_MEDIA_DIR:-${STATE_DIR}/media}"
+LOG_DIR="${LOTIDE_HAIKU_LOG_DIR:-${STATE_DIR}/log}"
+RUN_DIR="${LOTIDE_HAIKU_RUN_DIR:-${STATE_DIR}/run}"
+PACKAGE_WORK_DIR="${LOTIDE_HAIKU_PACKAGE_WORK_DIR:-${STATE_DIR}/package-work}"
+PACKAGE_OUT_DIR="${LOTIDE_HAIKU_PACKAGE_OUT_DIR:-${STATE_DIR}/packages}"
+LOTIDE_CARGO_TOML_BACKUP=""
+
+PGPORT="${LOTIDE_HAIKU_PGPORT:-55432}"
+LOTIDE_PORT="${LOTIDE_HAIKU_LOTIDE_PORT:-3333}"
+HITIDE_PORT="${LOTIDE_HAIKU_HITIDE_PORT:-4333}"
+BIND_ADDRESS="${LOTIDE_HAIKU_BIND_ADDRESS:-127.0.0.1}"
+PUBLIC_HOST="${LOTIDE_HAIKU_PUBLIC_HOST:-127.0.0.1}"
+HOST_URL_ACTIVITYPUB="${LOTIDE_HAIKU_HOST_URL_ACTIVITYPUB:-http://${PUBLIC_HOST}:${LOTIDE_PORT}/apub}"
+HOST_URL_API="${LOTIDE_HAIKU_HOST_URL_API:-http://${PUBLIC_HOST}:${LOTIDE_PORT}/api}"
+FRONTEND_URL="${LOTIDE_HAIKU_FRONTEND_URL:-http://${PUBLIC_HOST}:${HITIDE_PORT}}"
+DB_NAME="${LOTIDE_HAIKU_DB_NAME:-lotide_haiku}"
+DB_USER="${LOTIDE_HAIKU_DB_USER:-lotide}"
+DB_PASSWORD="${LOTIDE_HAIKU_DB_PASSWORD:-lotide}"
+PG_SUPERUSER="${LOTIDE_HAIKU_PG_SUPERUSER:-${USER:-$(id -un)}}"
+
+INSTALL_DEPS=0
+BUILD_RELEASE=1
+SETUP_LOCAL_DB=0
+RUN_SMOKE_TEST=0
+START_LOCAL_SERVICES=0
+CREATE_PACKAGE=1
+
+info() {
+    printf '==> %s\n' "$*"
+}
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  build_scripts/haiku_build_lotide [options]
+
+Options:
+  --install-deps       Install Haiku packages needed to build, test, and package.
+  --build-only         Build release binaries and skip package creation.
+  --package            Build release binaries and create the Haiku package.
+                       This is the default.
+  --setup-local-db     Initialize/start local PostgreSQL and run Lotide migrations.
+  --smoke-test         Build, package, set up PostgreSQL, start Lotide and Hitide,
+                       request both HTTP endpoints, then stop the services.
+  --start-local        Build, package, set up PostgreSQL, and start both services.
+                       This leaves the local services running until interrupted.
+  --no-build           Skip cargo build. Useful after a successful build.
+  --no-package         Skip Haiku package creation.
+  --help               Show this help.
+
+Environment:
+  LOTIDE_HAIKU_STATE_DIR        Local state directory. Default: .local/haiku-lotide
+  LOTIDE_HAIKU_PGPORT           Local PostgreSQL port. Default: 55432
+  LOTIDE_HAIKU_LOTIDE_PORT      Local Lotide port. Default: 3333
+  LOTIDE_HAIKU_HITIDE_PORT      Local Hitide port. Default: 4333
+  LOTIDE_HAIKU_BIND_ADDRESS     Listen address for both services. Default: 127.0.0.1
+  LOTIDE_HAIKU_PUBLIC_HOST      Host used in generated local URLs. Default: 127.0.0.1
+  LOTIDE_HAIKU_DB_NAME          Local database name. Default: lotide_haiku
+  LOTIDE_HAIKU_DB_USER          Local database role. Default: lotide
+  LOTIDE_HAIKU_DB_PASSWORD      Local database password. Default: lotide
+  LOTIDE_HAIKU_PG_SUPERUSER     PostgreSQL bootstrap user. Default: current user
+  CARGO_BUILD_JOBS              Cargo parallelism. Default: 1 on Haiku
+  CARGO_INCREMENTAL             Incremental compilation. Default: 0 on Haiku
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --install-deps)
+            INSTALL_DEPS=1
+            ;;
+        --build-only)
+            BUILD_RELEASE=1
+            CREATE_PACKAGE=0
+            ;;
+        --package)
+            CREATE_PACKAGE=1
+            ;;
+        --setup-local-db)
+            SETUP_LOCAL_DB=1
+            ;;
+        --smoke-test)
+            SETUP_LOCAL_DB=1
+            RUN_SMOKE_TEST=1
+            ;;
+        --start-local)
+            SETUP_LOCAL_DB=1
+            START_LOCAL_SERVICES=1
+            ;;
+        --no-build)
+            BUILD_RELEASE=0
+            ;;
+        --no-package)
+            CREATE_PACKAGE=0
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            die "unknown option: $1"
+            ;;
+    esac
+    shift
+done
+
+system_name() {
+    uname -s 2>/dev/null || printf 'unknown'
+}
+
+is_haiku() {
+    [ "$(system_name)" = "Haiku" ]
+}
+
+require_haiku() {
+    is_haiku || die "this script must be run on Haiku"
+}
+
+require_tool() {
+    command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"
+}
+
+install_dependencies() {
+    require_haiku
+    require_tool pkgman
+
+    #
+    # Haiku package names intentionally use the published binary Rust package.
+    # Building Rust from source on a base Haiku system is much heavier than
+    # Lotide itself, and does not improve the runtime package.
+    #
+    info "Installing Haiku build and PostgreSQL packages"
+    pkgman install -y \
+        rust_bin \
+        postgresql \
+        postgresql_server \
+        postgresql_devel \
+        openssl3_devel \
+        pkgconfig \
+        cmake \
+        curl
+}
+
+prepare_build_environment() {
+    require_haiku
+    require_tool cargo
+    require_tool rustc
+    require_tool pkg-config
+
+    #
+    # Haiku's package filesystem does not always provide the hard-link behavior
+    # cargo expects for incremental caches. Disabling incremental builds avoids
+    # spurious warnings and reduces the chance of cache churn on small systems.
+    #
+    export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
+    export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
+    export CARGO_PROFILE_RELEASE_STRIP="${CARGO_PROFILE_RELEASE_STRIP:-false}"
+}
+
+pin_haiku_proc_macro_dependencies() {
+    local syn_from syn_version
+
+    syn_from="${LOTIDE_HAIKU_SYN_FROM:-2.0.117}"
+    syn_version="${LOTIDE_HAIKU_SYN_PIN:-2.0.106}"
+
+    if [ -z "${syn_version}" ]; then
+        return
+    fi
+
+    #
+    # Haiku's rustc 1.94.1 package currently ICEs while compiling
+    # zerofrom-derive through newer syn releases. Pinning syn keeps the
+    # generated proc-macro support code within the compiler path that works
+    # on Haiku. This is a build workaround, not a protocol or runtime choice.
+    #
+    info "Pinning syn ${syn_version} for the Haiku Rust compiler"
+    (
+        cd "${LOTIDE_DIR}"
+        cargo update -p "syn@${syn_from}" --precise "${syn_version}"
+    )
+}
+
+strip_haiku_s3_dependencies() {
+    if [ "${LOTIDE_HAIKU_STRIP_S3_DEPS:-1}" = "0" ]; then
+        return
+    fi
+
+    LOTIDE_CARGO_TOML_BACKUP="${LOTIDE_DIR}/Cargo.toml.haiku-build-backup"
+
+    #
+    # The Haiku proof build disables S3 storage. The optional AWS crates still
+    # participate in Cargo's lockfile resolution and require newer syn releases
+    # than Haiku's current rustc can compile through zerofrom-derive. Removing
+    # those unused optional dependencies for the temporary build keeps local
+    # media storage working without changing the shipped source manifest.
+    #
+    info "Preparing Haiku-only Lotide manifest without optional S3 dependencies"
+    cp "${LOTIDE_DIR}/Cargo.toml" "${LOTIDE_CARGO_TOML_BACKUP}"
+    awk '
+        /^s3-storage = / {
+            print "s3-storage = []"
+            next
+        }
+        /^aws-config = / || /^aws-sdk-s3 = / {
+            next
+        }
+        {
+            print
+        }
+    ' "${LOTIDE_CARGO_TOML_BACKUP}" >"${LOTIDE_DIR}/Cargo.toml"
+}
+
+restore_haiku_s3_dependencies() {
+    if [ -n "${LOTIDE_CARGO_TOML_BACKUP}" ] && [ -f "${LOTIDE_CARGO_TOML_BACKUP}" ]; then
+        mv "${LOTIDE_CARGO_TOML_BACKUP}" "${LOTIDE_DIR}/Cargo.toml"
+        LOTIDE_CARGO_TOML_BACKUP=""
+    fi
+}
+
+cargo_ignore_rust_version_flag() {
+    local required current
+
+    required="$(sed -n 's/^rust-version = "\(.*\)"/\1/p' "${LOTIDE_DIR}/Cargo.toml" | head -1)"
+    current="$(rustc --version | awk '{print $2}')"
+
+    if [ -n "${required}" ] && [ -n "${current}" ] && ! version_at_least "${current}" "${required}"; then
+        printf '--ignore-rust-version'
+    fi
+}
+
+version_at_least() {
+    local current="$1"
+    local required="$2"
+    local current_major current_minor current_patch
+    local required_major required_minor required_patch
+
+    IFS=. read -r current_major current_minor current_patch <<EOF
+${current}
+EOF
+    IFS=. read -r required_major required_minor required_patch <<EOF
+${required}
+EOF
+
+    current_major="${current_major:-0}"
+    current_minor="${current_minor:-0}"
+    current_patch="${current_patch:-0}"
+    required_major="${required_major:-0}"
+    required_minor="${required_minor:-0}"
+    required_patch="${required_patch:-0}"
+
+    if [ "${current_major}" -gt "${required_major}" ]; then
+        return 0
+    fi
+    if [ "${current_major}" -lt "${required_major}" ]; then
+        return 1
+    fi
+
+    if [ "${current_minor}" -gt "${required_minor}" ]; then
+        return 0
+    fi
+    if [ "${current_minor}" -lt "${required_minor}" ]; then
+        return 1
+    fi
+
+    [ "${current_patch}" -ge "${required_patch}" ]
+}
+
+build_release_binaries() {
+    local ignore_rust_version_flag
+
+    prepare_build_environment
+    strip_haiku_s3_dependencies
+    trap restore_haiku_s3_dependencies EXIT
+    pin_haiku_proc_macro_dependencies
+    ignore_rust_version_flag="$(cargo_ignore_rust_version_flag)"
+
+    #
+    # The Haiku package uses local media storage. S3 support is intentionally
+    # left out of the default Haiku build because it pulls in a much larger
+    # dependency tree and is not needed for a base proof-of-concept instance.
+    #
+    info "Building Lotide release binary"
+    (
+        cd "${LOTIDE_DIR}"
+        cargo build --release --no-default-features --bin lotide \
+            ${ignore_rust_version_flag} \
+            -j "${CARGO_BUILD_JOBS}"
+    )
+
+    restore_haiku_s3_dependencies
+    trap - EXIT
+
+    info "Building Hitide release binary"
+    (
+        cd "${HITIDE_DIR}"
+        cargo build --release --bin hitide \
+            ${ignore_rust_version_flag} \
+            -j "${CARGO_BUILD_JOBS}"
+    )
+}
+
+require_postgres_tools() {
+    require_tool initdb
+    require_tool pg_ctl
+    require_tool postgres
+    require_tool psql
+    require_tool createdb
+    require_tool pg_isready
+}
+
+sql_literal() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+}
+
+require_simple_identifier() {
+    case "$2" in
+        ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*)
+            die "$1 must contain only ASCII letters, digits, and underscores"
+            ;;
+        [0123456789]*)
+            die "$1 must not start with a digit"
+            ;;
+    esac
+
+    if [ "${#2}" -gt 63 ]; then
+        die "$1 must be 63 characters or shorter for PostgreSQL identifiers"
+    fi
+}
+
+postgres_is_running() {
+    pg_isready -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" >/dev/null 2>&1
+}
+
+init_local_postgres() {
+    require_postgres_tools
+    mkdir -p "${STATE_DIR}" "${LOG_DIR}" "${RUN_DIR}" "${MEDIA_DIR}"
+
+    if [ ! -s "${PGDATA_DIR}/PG_VERSION" ]; then
+        info "Initializing PostgreSQL data directory at ${PGDATA_DIR}"
+        initdb -D "${PGDATA_DIR}" --auth=trust --encoding=UTF8 --locale=C
+    fi
+
+    if ! postgres_is_running; then
+        info "Starting local PostgreSQL on 127.0.0.1:${PGPORT}"
+        pg_ctl \
+            -D "${PGDATA_DIR}" \
+            -l "${LOG_DIR}/postgres.log" \
+            -o "-h 127.0.0.1 -p ${PGPORT}" \
+            start \
+            -w
+    else
+        info "PostgreSQL is already listening on 127.0.0.1:${PGPORT}"
+    fi
+}
+
+ensure_local_database() {
+    local password_sql
+
+    require_simple_identifier "LOTIDE_HAIKU_DB_USER" "${DB_USER}"
+    require_simple_identifier "LOTIDE_HAIKU_DB_NAME" "${DB_NAME}"
+    password_sql="$(sql_literal "${DB_PASSWORD}")"
+
+    if ! psql -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -d postgres \
+        -tAc "SELECT 1 FROM pg_roles WHERE rolname = $(sql_literal "${DB_USER}")" |
+        grep -q 1; then
+        info "Creating PostgreSQL role ${DB_USER}"
+        psql -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -d postgres \
+            -c "CREATE ROLE \"${DB_USER}\" WITH LOGIN PASSWORD ${password_sql}"
+    fi
+
+    if ! psql -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -d postgres \
+        -tAc "SELECT 1 FROM pg_database WHERE datname = $(sql_literal "${DB_NAME}")" |
+        grep -q 1; then
+        info "Creating PostgreSQL database ${DB_NAME}"
+        createdb -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -O "${DB_USER}" "${DB_NAME}"
+    fi
+}
+
+write_env_files() {
+    cat >"${RUN_DIR}/lotide.env" <<EOF
+DATABASE_URL='postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${PGPORT}/${DB_NAME}?sslmode=disable'
+HOST_URL_ACTIVITYPUB='${HOST_URL_ACTIVITYPUB}'
+HOST_URL_API='${HOST_URL_API}'
+BIND_ADDRESS='${BIND_ADDRESS}'
+PORT='${LOTIDE_PORT}'
+APUB_PROXY_REWRITES='true'
+ALLOW_FORWARDED='true'
+DEV_MODE='true'
+MEDIA_STORAGE='local'
+MEDIA_LOCATION='${MEDIA_DIR}'
+SEPARATE_WORKER='true'
+RUST_LOG='lotide=info'
+EOF
+
+    cat >"${RUN_DIR}/hitide.env" <<EOF
+BACKEND_HOST='http://127.0.0.1:${LOTIDE_PORT}'
+FRONTEND_URL='${FRONTEND_URL}'
+BIND_ADDRESS='${BIND_ADDRESS}'
+PORT='${HITIDE_PORT}'
+RUST_LOG='hitide=info'
+EOF
+}
+
+lotide_bin() {
+    printf '%s/target/release/lotide\n' "${LOTIDE_DIR}"
+}
+
+hitide_bin() {
+    printf '%s/target/release/hitide\n' "${HITIDE_DIR}"
+}
+
+run_lotide_migrations() {
+    local bin migration tag already_applied
+    bin="$(lotide_bin)"
+    [ -x "${bin}" ] || die "missing Lotide binary: ${bin}"
+
+    #
+    # The normal embedded migration command currently opens PostgreSQL on Haiku
+    # and then waits forever in the migration library path. Applying the same
+    # checked-in SQL files through psql keeps the Haiku bootstrap path simple
+    # and makes repeated local starts deterministic.
+    #
+    info "Applying Lotide SQL migrations with psql"
+    PGPASSWORD="${DB_PASSWORD}" psql \
+        -h 127.0.0.1 \
+        -p "${PGPORT}" \
+        -U "${DB_USER}" \
+        -d "${DB_NAME}" \
+        -v ON_ERROR_STOP=1 \
+        -c "CREATE TABLE IF NOT EXISTS haiku_applied_migrations (tag text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
+    PGPASSWORD="${DB_PASSWORD}" psql \
+        -h 127.0.0.1 \
+        -p "${PGPORT}" \
+        -U "${DB_USER}" \
+        -d "${DB_NAME}" \
+        -v ON_ERROR_STOP=1 \
+        -c "CREATE TABLE IF NOT EXISTS __migrant_migrations (tag text unique)"
+
+    for migration in "${LOTIDE_DIR}"/migrations/*; do
+        [ -f "${migration}/up.sql" ] || continue
+        tag="$(basename "${migration}")"
+
+        case "${tag}" in
+            *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
+                die "unexpected migration tag: ${tag}"
+                ;;
+        esac
+
+        already_applied="$(
+            PGPASSWORD="${DB_PASSWORD}" psql \
+                -h 127.0.0.1 \
+                -p "${PGPORT}" \
+                -U "${DB_USER}" \
+                -d "${DB_NAME}" \
+                -tAc "SELECT 1 FROM haiku_applied_migrations WHERE tag = $(sql_literal "${tag}")"
+        )"
+
+        if [ "${already_applied}" = "1" ]; then
+            PGPASSWORD="${DB_PASSWORD}" psql \
+                -h 127.0.0.1 \
+                -p "${PGPORT}" \
+                -U "${DB_USER}" \
+                -d "${DB_NAME}" \
+                -v ON_ERROR_STOP=1 \
+                -c "INSERT INTO __migrant_migrations (tag) VALUES ($(sql_literal "${tag}")) ON CONFLICT DO NOTHING"
+            continue
+        fi
+
+        info "Applying ${tag}"
+        PGPASSWORD="${DB_PASSWORD}" psql \
+            -h 127.0.0.1 \
+            -p "${PGPORT}" \
+            -U "${DB_USER}" \
+            -d "${DB_NAME}" \
+            -v ON_ERROR_STOP=1 \
+            -f "${migration}/up.sql"
+        PGPASSWORD="${DB_PASSWORD}" psql \
+            -h 127.0.0.1 \
+            -p "${PGPORT}" \
+            -U "${DB_USER}" \
+            -d "${DB_NAME}" \
+            -v ON_ERROR_STOP=1 \
+            -c "INSERT INTO haiku_applied_migrations (tag) VALUES ($(sql_literal "${tag}"))"
+        PGPASSWORD="${DB_PASSWORD}" psql \
+            -h 127.0.0.1 \
+            -p "${PGPORT}" \
+            -U "${DB_USER}" \
+            -d "${DB_NAME}" \
+            -v ON_ERROR_STOP=1 \
+            -c "INSERT INTO __migrant_migrations (tag) VALUES ($(sql_literal "${tag}")) ON CONFLICT DO NOTHING"
+    done
+}
+
+setup_local_database() {
+    init_local_postgres
+    ensure_local_database
+    write_env_files
+    run_lotide_migrations
+}
+
+stop_services() {
+    local pid_file pid
+
+    for pid_file in "${RUN_DIR}/hitide.pid" "${RUN_DIR}/lotide.pid"; do
+        if [ -s "${pid_file}" ]; then
+            pid="$(cat "${pid_file}")"
+            if kill -0 "${pid}" >/dev/null 2>&1; then
+                kill "${pid}" >/dev/null 2>&1 || true
+                wait "${pid}" 2>/dev/null || true
+            fi
+            rm -f "${pid_file}"
+        fi
+    done
+}
+
+start_services() {
+    local lotide_bin_path hitide_bin_path lotide_pid hitide_pid
+
+    lotide_bin_path="$(lotide_bin)"
+    hitide_bin_path="$(hitide_bin)"
+
+    [ -x "${lotide_bin_path}" ] || die "missing Lotide binary: ${lotide_bin_path}"
+    [ -x "${hitide_bin_path}" ] || die "missing Hitide binary: ${hitide_bin_path}"
+
+    stop_services
+    mkdir -p "${LOG_DIR}" "${RUN_DIR}"
+
+    info "Starting local Lotide on http://127.0.0.1:${LOTIDE_PORT}"
+    (
+        set -a
+        # shellcheck disable=SC1090
+        . "${RUN_DIR}/lotide.env"
+        set +a
+        cd "${LOTIDE_DIR}"
+        "${lotide_bin_path}"
+    ) >"${LOG_DIR}/lotide.log" 2>&1 &
+    lotide_pid=$!
+
+    info "Starting local Hitide on http://127.0.0.1:${HITIDE_PORT}"
+    (
+        set -a
+        # shellcheck disable=SC1090
+        . "${RUN_DIR}/hitide.env"
+        set +a
+        cd "${HITIDE_DIR}"
+        "${hitide_bin_path}"
+    ) >"${LOG_DIR}/hitide.log" 2>&1 &
+    hitide_pid=$!
+
+    printf '%s\n' "${lotide_pid}" >"${RUN_DIR}/lotide.pid"
+    printf '%s\n' "${hitide_pid}" >"${RUN_DIR}/hitide.pid"
+}
+
+wait_for_url() {
+    local url="$1"
+    local name="$2"
+    local attempt
+
+    require_tool curl
+
+    for attempt in $(seq 1 60); do
+        if curl -fsS "${url}" >/dev/null 2>&1; then
+            info "${name} responded at ${url}"
+            return 0
+        fi
+        sleep 1
+    done
+
+    return 1
+}
+
+run_smoke_test() {
+    start_services
+    trap stop_services EXIT
+
+    wait_for_url "http://127.0.0.1:${LOTIDE_PORT}/api/unstable/instance" "Lotide API" ||
+        die "Lotide did not respond; see ${LOG_DIR}/lotide.log"
+    wait_for_url "http://127.0.0.1:${HITIDE_PORT}/" "Hitide frontend" ||
+        die "Hitide did not respond; see ${LOG_DIR}/hitide.log"
+
+    info "Smoke test passed"
+    stop_services
+    trap - EXIT
+}
+
+cargo_package_version() {
+    sed -n 's/^version = "\(.*\)"/\1/p' "${LOTIDE_DIR}/Cargo.toml" | head -1
+}
+
+haiku_package_version() {
+    local version
+    version="$(cargo_package_version | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
+    printf '%s-1\n' "${version}"
+}
+
+haiku_package_architecture() {
+    case "$(uname -m)" in
+        x86_64) printf 'x86_64\n' ;;
+        *)
+            die "unsupported Haiku package architecture: $(uname -m)"
+            ;;
+    esac
+}
+
+write_packaged_helper_scripts() {
+    local bin_dir data_dir
+
+    bin_dir="$1"
+    data_dir="$2"
+
+    cat >"${bin_dir}/lotide-haiku-initdb" <<'EOF'
+#!/bin/bash
+#
+# Project: Lotide Haiku Runtime Support
+# -------------------------------------
+#
+# File: lotide-haiku-initdb
+#
+# Purpose:
+#
+#     Initialize the local PostgreSQL data directory used by a small Haiku
+#     Lotide instance.
+#
+# Responsibilities:
+#
+#     - create a local PostgreSQL cluster if one does not exist
+#     - start PostgreSQL on the configured local port
+#     - create the Lotide role and database
+#
+# This file intentionally does NOT contain:
+#
+#     - public ActivityPub URL policy
+#     - frontend startup
+#     - reverse proxy setup
+
+set -euo pipefail
+
+STATE_DIR="${LOTIDE_HAIKU_STATE_DIR:-/boot/home/config/settings/lotide}"
+PGDATA_DIR="${LOTIDE_HAIKU_PGDATA:-${STATE_DIR}/postgres-data}"
+LOG_DIR="${LOTIDE_HAIKU_LOG_DIR:-${STATE_DIR}/log}"
+RUN_DIR="${LOTIDE_HAIKU_RUN_DIR:-${STATE_DIR}/run}"
+PGPORT="${LOTIDE_HAIKU_PGPORT:-55432}"
+DB_NAME="${LOTIDE_HAIKU_DB_NAME:-lotide_haiku}"
+DB_USER="${LOTIDE_HAIKU_DB_USER:-lotide}"
+DB_PASSWORD="${LOTIDE_HAIKU_DB_PASSWORD:-lotide}"
+PG_SUPERUSER="${LOTIDE_HAIKU_PG_SUPERUSER:-${USER:-$(id -un)}}"
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+require_tool() {
+    command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"
+}
+
+sql_literal() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+}
+
+require_simple_identifier() {
+    case "$2" in
+        ''|*[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*)
+            die "$1 must contain only ASCII letters, digits, and underscores"
+            ;;
+        [0123456789]*)
+            die "$1 must not start with a digit"
+            ;;
+    esac
+
+    if [ "${#2}" -gt 63 ]; then
+        die "$1 must be 63 characters or shorter for PostgreSQL identifiers"
+    fi
+}
+
+for tool in initdb pg_ctl postgres psql createdb pg_isready; do
+    require_tool "${tool}"
+done
+
+mkdir -p "${STATE_DIR}" "${LOG_DIR}" "${RUN_DIR}"
+
+if [ ! -s "${PGDATA_DIR}/PG_VERSION" ]; then
+    initdb -D "${PGDATA_DIR}" --auth=trust --encoding=UTF8 --locale=C
+fi
+
+if ! pg_isready -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" >/dev/null 2>&1; then
+    pg_ctl \
+        -D "${PGDATA_DIR}" \
+        -l "${LOG_DIR}/postgres.log" \
+        -o "-h 127.0.0.1 -p ${PGPORT}" \
+        start \
+        -w
+fi
+
+require_simple_identifier "LOTIDE_HAIKU_DB_USER" "${DB_USER}"
+require_simple_identifier "LOTIDE_HAIKU_DB_NAME" "${DB_NAME}"
+
+if ! psql -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -d postgres \
+    -tAc "SELECT 1 FROM pg_roles WHERE rolname = $(sql_literal "${DB_USER}")" |
+    grep -q 1; then
+    psql -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -d postgres \
+        -c "CREATE ROLE \"${DB_USER}\" WITH LOGIN PASSWORD $(sql_literal "${DB_PASSWORD}")"
+fi
+
+if ! psql -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -d postgres \
+    -tAc "SELECT 1 FROM pg_database WHERE datname = $(sql_literal "${DB_NAME}")" |
+    grep -q 1; then
+    createdb -h 127.0.0.1 -p "${PGPORT}" -U "${PG_SUPERUSER}" -O "${DB_USER}" "${DB_NAME}"
+fi
+
+printf 'PostgreSQL is ready on 127.0.0.1:%s for database %s\n' "${PGPORT}" "${DB_NAME}"
+
+# end of lotide-haiku-initdb
+EOF
+
+    cat >"${bin_dir}/lotide-haiku-run" <<'EOF'
+#!/bin/bash
+#
+# Project: Lotide Haiku Runtime Support
+# -------------------------------------
+#
+# File: lotide-haiku-run
+#
+# Purpose:
+#
+#     Start a small local Lotide and Hitide instance on Haiku.
+#
+# Responsibilities:
+#
+#     - ensure PostgreSQL is initialized
+#     - write default local environment files when missing
+#     - apply Lotide migrations
+#     - start Lotide and Hitide with local media storage
+#
+# This file intentionally does NOT contain:
+#
+#     - production TLS setup
+#     - service supervisor integration
+#     - public reverse proxy configuration
+
+set -euo pipefail
+
+STATE_DIR="${LOTIDE_HAIKU_STATE_DIR:-/boot/home/config/settings/lotide}"
+MEDIA_DIR="${LOTIDE_HAIKU_MEDIA_DIR:-/boot/home/config/non-packaged/data/lotide/media}"
+LOG_DIR="${LOTIDE_HAIKU_LOG_DIR:-${STATE_DIR}/log}"
+RUN_DIR="${LOTIDE_HAIKU_RUN_DIR:-${STATE_DIR}/run}"
+PGPORT="${LOTIDE_HAIKU_PGPORT:-55432}"
+LOTIDE_PORT="${LOTIDE_HAIKU_LOTIDE_PORT:-3333}"
+HITIDE_PORT="${LOTIDE_HAIKU_HITIDE_PORT:-4333}"
+BIND_ADDRESS="${LOTIDE_HAIKU_BIND_ADDRESS:-127.0.0.1}"
+PUBLIC_HOST="${LOTIDE_HAIKU_PUBLIC_HOST:-127.0.0.1}"
+HOST_URL_ACTIVITYPUB="${LOTIDE_HAIKU_HOST_URL_ACTIVITYPUB:-http://${PUBLIC_HOST}:${LOTIDE_PORT}/apub}"
+HOST_URL_API="${LOTIDE_HAIKU_HOST_URL_API:-http://${PUBLIC_HOST}:${LOTIDE_PORT}/api}"
+FRONTEND_URL="${LOTIDE_HAIKU_FRONTEND_URL:-http://${PUBLIC_HOST}:${HITIDE_PORT}}"
+DB_NAME="${LOTIDE_HAIKU_DB_NAME:-lotide_haiku}"
+DB_USER="${LOTIDE_HAIKU_DB_USER:-lotide}"
+DB_PASSWORD="${LOTIDE_HAIKU_DB_PASSWORD:-lotide}"
+MIGRATIONS_DIR="${LOTIDE_HAIKU_MIGRATIONS_DIR:-/boot/system/data/lotide/migrations}"
+
+die() {
+    printf 'error: %s\n' "$*" >&2
+    exit 1
+}
+
+require_tool() {
+    command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"
+}
+
+write_default_env_files() {
+    mkdir -p "${STATE_DIR}" "${MEDIA_DIR}" "${LOG_DIR}" "${RUN_DIR}"
+
+    if [ ! -s "${STATE_DIR}/lotide.env" ]; then
+        cat >"${STATE_DIR}/lotide.env" <<EOF_INNER
+DATABASE_URL='postgresql://${DB_USER}:${DB_PASSWORD}@127.0.0.1:${PGPORT}/${DB_NAME}?sslmode=disable'
+HOST_URL_ACTIVITYPUB='${HOST_URL_ACTIVITYPUB}'
+HOST_URL_API='${HOST_URL_API}'
+BIND_ADDRESS='${BIND_ADDRESS}'
+PORT='${LOTIDE_PORT}'
+APUB_PROXY_REWRITES='true'
+ALLOW_FORWARDED='true'
+DEV_MODE='true'
+MEDIA_STORAGE='local'
+MEDIA_LOCATION='${MEDIA_DIR}'
+SEPARATE_WORKER='true'
+RUST_LOG='lotide=info'
+EOF_INNER
+    fi
+
+    if [ ! -s "${STATE_DIR}/hitide.env" ]; then
+        cat >"${STATE_DIR}/hitide.env" <<EOF_INNER
+BACKEND_HOST='http://127.0.0.1:${LOTIDE_PORT}'
+FRONTEND_URL='${FRONTEND_URL}'
+BIND_ADDRESS='${BIND_ADDRESS}'
+PORT='${HITIDE_PORT}'
+RUST_LOG='hitide=info'
+EOF_INNER
+    fi
+}
+
+stop_existing_services() {
+    local pid_file pid
+
+    for pid_file in "${RUN_DIR}/hitide.pid" "${RUN_DIR}/lotide.pid"; do
+        if [ -s "${pid_file}" ]; then
+            pid="$(cat "${pid_file}")"
+            if kill -0 "${pid}" >/dev/null 2>&1; then
+                kill "${pid}" >/dev/null 2>&1 || true
+            fi
+            rm -f "${pid_file}"
+        fi
+    done
+}
+
+require_tool lotide
+require_tool hitide
+require_tool lotide-haiku-initdb
+require_tool psql
+
+lotide-haiku-initdb
+write_default_env_files
+
+sql_literal() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"
+}
+
+apply_packaged_migrations() {
+    local migration tag already_applied
+
+    [ -d "${MIGRATIONS_DIR}" ] || die "missing packaged migrations: ${MIGRATIONS_DIR}"
+
+    PGPASSWORD="${DB_PASSWORD}" psql \
+        -h 127.0.0.1 \
+        -p "${PGPORT}" \
+        -U "${DB_USER}" \
+        -d "${DB_NAME}" \
+        -v ON_ERROR_STOP=1 \
+        -c "CREATE TABLE IF NOT EXISTS haiku_applied_migrations (tag text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
+    PGPASSWORD="${DB_PASSWORD}" psql \
+        -h 127.0.0.1 \
+        -p "${PGPORT}" \
+        -U "${DB_USER}" \
+        -d "${DB_NAME}" \
+        -v ON_ERROR_STOP=1 \
+        -c "CREATE TABLE IF NOT EXISTS __migrant_migrations (tag text unique)"
+
+    for migration in "${MIGRATIONS_DIR}"/*; do
+        [ -f "${migration}/up.sql" ] || continue
+        tag="$(basename "${migration}")"
+
+        case "${tag}" in
+            *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-]*)
+                die "unexpected migration tag: ${tag}"
+                ;;
+        esac
+
+        already_applied="$(
+            PGPASSWORD="${DB_PASSWORD}" psql \
+                -h 127.0.0.1 \
+                -p "${PGPORT}" \
+                -U "${DB_USER}" \
+                -d "${DB_NAME}" \
+                -tAc "SELECT 1 FROM haiku_applied_migrations WHERE tag = $(sql_literal "${tag}")"
+        )"
+
+        if [ "${already_applied}" = "1" ]; then
+            PGPASSWORD="${DB_PASSWORD}" psql \
+                -h 127.0.0.1 \
+                -p "${PGPORT}" \
+                -U "${DB_USER}" \
+                -d "${DB_NAME}" \
+                -v ON_ERROR_STOP=1 \
+                -c "INSERT INTO __migrant_migrations (tag) VALUES ($(sql_literal "${tag}")) ON CONFLICT DO NOTHING"
+            continue
+        fi
+
+        printf 'applying %s\n' "${tag}"
+        PGPASSWORD="${DB_PASSWORD}" psql \
+            -h 127.0.0.1 \
+            -p "${PGPORT}" \
+            -U "${DB_USER}" \
+            -d "${DB_NAME}" \
+            -v ON_ERROR_STOP=1 \
+            -f "${migration}/up.sql"
+        PGPASSWORD="${DB_PASSWORD}" psql \
+            -h 127.0.0.1 \
+            -p "${PGPORT}" \
+            -U "${DB_USER}" \
+            -d "${DB_NAME}" \
+            -v ON_ERROR_STOP=1 \
+            -c "INSERT INTO haiku_applied_migrations (tag) VALUES ($(sql_literal "${tag}"))"
+        PGPASSWORD="${DB_PASSWORD}" psql \
+            -h 127.0.0.1 \
+            -p "${PGPORT}" \
+            -U "${DB_USER}" \
+            -d "${DB_NAME}" \
+            -v ON_ERROR_STOP=1 \
+            -c "INSERT INTO __migrant_migrations (tag) VALUES ($(sql_literal "${tag}")) ON CONFLICT DO NOTHING"
+    done
+}
+
+apply_packaged_migrations
+
+stop_existing_services
+
+(
+    set -a
+    # shellcheck disable=SC1090
+    . "${STATE_DIR}/lotide.env"
+    set +a
+    lotide
+) >"${LOG_DIR}/lotide.log" 2>&1 &
+printf '%s\n' "$!" >"${RUN_DIR}/lotide.pid"
+
+(
+    set -a
+    # shellcheck disable=SC1090
+    . "${STATE_DIR}/hitide.env"
+    set +a
+    hitide
+) >"${LOG_DIR}/hitide.log" 2>&1 &
+printf '%s\n' "$!" >"${RUN_DIR}/hitide.pid"
+
+cat <<EOF_INNER
+Lotide and Hitide are running locally.
+
+  Lotide API: http://127.0.0.1:${LOTIDE_PORT}/api/unstable/instance
+  Hitide UI : http://127.0.0.1:${HITIDE_PORT}/
+  Settings  : ${STATE_DIR}
+  Logs      : ${LOG_DIR}
+
+Stop them with:
+  lotide-haiku-stop
+EOF_INNER
+
+# end of lotide-haiku-run
+EOF
+
+    cat >"${bin_dir}/lotide-haiku-stop" <<'EOF'
+#!/bin/bash
+#
+# Project: Lotide Haiku Runtime Support
+# -------------------------------------
+#
+# File: lotide-haiku-stop
+#
+# Purpose:
+#
+#     Stop a Lotide and Hitide pair started by lotide-haiku-run.
+#
+# Responsibilities:
+#
+#     - read recorded runtime PIDs
+#     - stop only the recorded Lotide and Hitide processes
+#     - leave PostgreSQL running for later reuse
+#
+# This file intentionally does NOT contain:
+#
+#     - PostgreSQL shutdown
+#     - service manager integration
+#     - process discovery by name
+
+set -euo pipefail
+
+STATE_DIR="${LOTIDE_HAIKU_STATE_DIR:-/boot/home/config/settings/lotide}"
+RUN_DIR="${LOTIDE_HAIKU_RUN_DIR:-${STATE_DIR}/run}"
+
+for pid_file in "${RUN_DIR}/hitide.pid" "${RUN_DIR}/lotide.pid"; do
+    if [ -s "${pid_file}" ]; then
+        pid="$(cat "${pid_file}")"
+        if kill -0 "${pid}" >/dev/null 2>&1; then
+            kill "${pid}" >/dev/null 2>&1 || true
+        fi
+        rm -f "${pid_file}"
+    fi
+done
+
+printf 'Lotide and Hitide have been stopped if they were running.\n'
+
+# end of lotide-haiku-stop
+EOF
+
+    chmod +x \
+        "${bin_dir}/lotide-haiku-initdb" \
+        "${bin_dir}/lotide-haiku-run" \
+        "${bin_dir}/lotide-haiku-stop"
+
+    cat >"${data_dir}/README.haiku" <<'EOF'
+Lotide on Haiku
+===============
+
+This package installs the Lotide server, the Hitide frontend, and small helper
+scripts for a local PostgreSQL-backed instance.
+
+Quick start:
+
+  lotide-haiku-initdb
+  lotide-haiku-run
+
+The default local settings are written to:
+
+  /boot/home/config/settings/lotide/lotide.env
+  /boot/home/config/settings/lotide/hitide.env
+
+The default package listens on 127.0.0.1. To expose it to another machine or a
+reverse proxy, edit BIND_ADDRESS in those environment files before running
+lotide-haiku-run again.
+
+Stop the local frontend and backend with:
+
+  lotide-haiku-stop
+
+PostgreSQL is left running so repeated development starts are faster.
+EOF
+}
+
+write_package_info() {
+    local package_info="$1"
+    local package_version="$2"
+    local provide_version
+
+    provide_version="${package_version%-1}"
+
+    cat >"${package_info}" <<EOF
+name            lotide_haiku
+version         ${package_version}
+architecture    $(haiku_package_architecture)
+summary         "Lotide and Hitide ActivityPub services"
+description     "Lotide is a federated forum server using ActivityPub. Hitide is its small server-rendered web frontend. This Haiku package installs both release binaries and helper scripts for a local PostgreSQL-backed instance."
+packager        "Lotide contributors"
+vendor          "Lotide"
+licenses {
+    "AGPL-3.0-or-later"
+}
+copyrights {
+    "2026 Lotide contributors"
+}
+provides {
+    lotide_haiku = ${provide_version} compat >= 0
+    cmd:lotide = ${provide_version}
+    cmd:hitide = ${provide_version}
+    cmd:lotide_haiku_initdb = ${provide_version}
+    cmd:lotide_haiku_run = ${provide_version}
+    cmd:lotide_haiku_stop = ${provide_version}
+}
+requires {
+    haiku
+    cmd:initdb
+    cmd:pg_ctl
+    cmd:postgres
+    cmd:psql
+    cmd:createdb
+    cmd:pg_isready
+    lib:libcrypto >= 3
+    lib:libssl >= 3
+    lib:libpq
+}
+urls {
+    "https://sr.ht/~vpzom/lotide/"
+}
+EOF
+}
+
+create_haiku_package() {
+    local package_version stage_dir system_bin data_dir license_dir package_info hpkg_path pkg_path
+
+    require_haiku
+    require_tool package
+
+    [ -x "$(lotide_bin)" ] || die "missing Lotide binary: $(lotide_bin)"
+    [ -x "$(hitide_bin)" ] || die "missing Hitide binary: $(hitide_bin)"
+
+    package_version="$(haiku_package_version)"
+    stage_dir="${PACKAGE_WORK_DIR}/stage"
+    system_bin="${stage_dir}/bin"
+    data_dir="${stage_dir}/data/lotide"
+    license_dir="${stage_dir}/data/licenses"
+    package_info="${PACKAGE_WORK_DIR}/PackageInfo"
+    hpkg_path="${PACKAGE_OUT_DIR}/lotide_haiku-${package_version}-$(haiku_package_architecture).hpkg"
+    pkg_path="${PACKAGE_OUT_DIR}/lotide_haiku-${package_version}-$(haiku_package_architecture).pkg"
+
+    rm -rf "${stage_dir}"
+    mkdir -p "${system_bin}" "${data_dir}" "${license_dir}" "${PACKAGE_OUT_DIR}"
+
+    cp "$(lotide_bin)" "${system_bin}/lotide"
+    cp "$(hitide_bin)" "${system_bin}/hitide"
+    cp "${LOTIDE_DIR}/LICENSE" "${license_dir}/AGPL-3.0-or-later"
+    cp -R "${LOTIDE_DIR}/migrations" "${data_dir}/migrations"
+    chmod +x "${system_bin}/lotide" "${system_bin}/hitide"
+
+    write_packaged_helper_scripts "${system_bin}" "${data_dir}"
+    write_package_info "${package_info}" "${package_version}"
+
+    info "Creating Haiku package ${hpkg_path}"
+    package create -C "${stage_dir}" -i "${package_info}" "${hpkg_path}"
+
+    #
+    # Haiku package files normally use .hpkg. A .pkg copy is emitted because
+    # some people use that name generically when asking for an installable
+    # package artifact.
+    #
+    cp "${hpkg_path}" "${pkg_path}"
+
+    printf '%s\n' "${hpkg_path}"
+    printf '%s\n' "${pkg_path}"
+}
+
+if [ "${INSTALL_DEPS}" -eq 1 ]; then
+    install_dependencies
+fi
+
+if [ "${BUILD_RELEASE}" -eq 1 ]; then
+    build_release_binaries
+fi
+
+if [ "${CREATE_PACKAGE}" -eq 1 ]; then
+    create_haiku_package
+fi
+
+if [ "${SETUP_LOCAL_DB}" -eq 1 ]; then
+    setup_local_database
+fi
+
+if [ "${RUN_SMOKE_TEST}" -eq 1 ]; then
+    run_smoke_test
+elif [ "${START_LOCAL_SERVICES}" -eq 1 ]; then
+    start_services
+    cat <<EOF
+Lotide and Hitide are running locally.
+
+  Lotide API: ${HOST_URL_API}/unstable/instance
+  Hitide UI : ${FRONTEND_URL}/
+  Logs      : ${LOG_DIR}
+
+Stop them with:
+  kill \$(cat "${RUN_DIR}/hitide.pid") \$(cat "${RUN_DIR}/lotide.pid")
+EOF
+fi
+
+cat <<EOF
+Done.
+
+Lotide binary : $(lotide_bin)
+Hitide binary : $(hitide_bin)
+Local state   : ${STATE_DIR}
+Package output: ${PACKAGE_OUT_DIR}
+EOF
+
+# end of haiku_build_lotide

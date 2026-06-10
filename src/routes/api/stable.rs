@@ -1,3 +1,4 @@
+use crate::hyper;
 use crate::lang;
 use crate::types::{CommentLocalID, CommunityLocalID, PostLocalID, UserLocalID};
 use futures::TryStreamExt;
@@ -92,7 +93,7 @@ async fn route_stable_communities_feed_get(
 
     let community_row = db
         .query_opt(
-            "SELECT name, local FROM community WHERE id=$1",
+            "SELECT name, local FROM community WHERE id=$1 AND NOT deleted",
             &[&community_id],
         )
         .await?
@@ -172,6 +173,7 @@ async fn route_stable_communities_feed_get(
                 name: author_username,
                 email: None,
                 uri: author_ap_id,
+                extensions: Default::default(),
             });
             entry_builder.published(created);
             entry_builder.link(
@@ -202,7 +204,7 @@ async fn route_stable_communities_feed_get(
                         (Some(content), None) => Some(content.into_owned()),
                         (None, Some(link_content)) => Some(link_content),
                         (Some(content), Some(link_content)) => {
-                            Some(format!("{}{}", content, link_content))
+                            Some(format!("{content}{link_content}"))
                         }
                     }
                 },
@@ -333,8 +335,8 @@ async fn route_unstable_users_avatar_href_get(
 
                         let media_row = db
                             .query_opt(
-                                "SELECT path, mime FROM media WHERE id=$1",
-                                &[&media_id.as_int()],
+                                "SELECT path, mime FROM media WHERE id=$1 AND person=$2",
+                                &[&media_id.as_int(), &user_id],
                             )
                             .await?;
                         match media_row {
@@ -373,6 +375,129 @@ async fn route_unstable_users_avatar_href_get(
     }
 }
 
+async fn route_stable_instance_logo_get(
+    (): (),
+    ctx: Arc<crate::RouteContext>,
+    _req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let db = ctx.db_pool.get().await?;
+
+    let href: Option<String> = db
+        .query_one("SELECT site_logo FROM site WHERE local=TRUE", &[])
+        .await?
+        .get(0);
+
+    match href {
+        None => Ok(crate::simple_response(
+            hyper::StatusCode::NOT_FOUND,
+            "No site logo",
+        )),
+        Some(href) => {
+            if let Some(rest) = href.strip_prefix("local-media://") {
+                let media_id: crate::Pineapple = rest.parse()?;
+
+                let media_row = db
+                    .query_opt(
+                        "SELECT path, mime FROM media WHERE id=$1",
+                        &[&media_id.as_int()],
+                    )
+                    .await?;
+
+                match media_row {
+                    None => Ok(crate::simple_response(
+                        hyper::StatusCode::NOT_FOUND,
+                        "Site logo media is missing",
+                    )),
+                    Some(media_row) => {
+                        let path: &str = media_row.get(0);
+                        let mime: &str = media_row.get(1);
+
+                        if let Some(media_storage) = &ctx.media_storage {
+                            let file = media_storage.open(path).await?;
+                            let body = hyper::Body::wrap_stream(file);
+
+                            Ok(crate::common_response_builder()
+                                .header(hyper::header::CONTENT_TYPE, mime)
+                                .header(hyper::header::CACHE_CONTROL, "no-cache")
+                                .body(body)?)
+                        } else {
+                            Ok(crate::simple_response(
+                                hyper::StatusCode::NOT_FOUND,
+                                "Site logo media is unavailable",
+                            ))
+                        }
+                    }
+                }
+            } else {
+                Ok(crate::common_response_builder()
+                    .status(hyper::StatusCode::FOUND)
+                    .header(hyper::header::LOCATION, &href)
+                    .header(hyper::header::CACHE_CONTROL, "no-cache")
+                    .body(href.into())?)
+            }
+        }
+    }
+}
+
+async fn route_stable_instance_stylesheet_get(
+    (): (),
+    ctx: Arc<crate::RouteContext>,
+    _req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let db = ctx.db_pool.get().await?;
+
+    let href: Option<String> = db
+        .query_one("SELECT site_css FROM site WHERE local=TRUE", &[])
+        .await?
+        .get(0);
+
+    match href {
+        None => Ok(crate::simple_response(
+            hyper::StatusCode::NOT_FOUND,
+            "No site stylesheet",
+        )),
+        Some(href) => {
+            let Some(rest) = href.strip_prefix("local-media://") else {
+                return Ok(crate::simple_response(
+                    hyper::StatusCode::NOT_FOUND,
+                    "Site stylesheet is not local media",
+                ));
+            };
+
+            let media_id: crate::Pineapple = rest.parse()?;
+            let media_row = db
+                .query_opt("SELECT path FROM media WHERE id=$1", &[&media_id.as_int()])
+                .await?;
+
+            match media_row {
+                None => Ok(crate::simple_response(
+                    hyper::StatusCode::NOT_FOUND,
+                    "Site stylesheet media is missing",
+                )),
+                Some(media_row) => {
+                    let path: &str = media_row.get(0);
+
+                    if let Some(media_storage) = &ctx.media_storage {
+                        let file = media_storage.open(path).await?;
+                        let body = hyper::Body::wrap_stream(file);
+
+                        Ok(crate::common_response_builder()
+                            .header(hyper::header::CONTENT_TYPE, "text/css; charset=utf-8")
+                            .header(hyper::header::CACHE_CONTROL, "no-cache")
+                            .header("X-Content-Type-Options", "nosniff")
+                            .body(body)?)
+                    } else {
+                        Ok(crate::simple_response(
+                            hyper::StatusCode::NOT_FOUND,
+                            "Site stylesheet media is unavailable",
+                        ))
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn route_stable() -> crate::RouteNode<()> {
     crate::RouteNode::new()
         .with_child(
@@ -396,6 +521,22 @@ pub fn route_stable() -> crate::RouteNode<()> {
                         .with_handler_async(hyper::Method::GET, route_stable_communities_feed_get),
                 ),
             ),
+        )
+        .with_child(
+            "instance",
+            crate::RouteNode::new()
+                .with_child(
+                    "logo",
+                    crate::RouteNode::new()
+                        .with_handler_async(hyper::Method::GET, route_stable_instance_logo_get),
+                )
+                .with_child(
+                    "stylesheet",
+                    crate::RouteNode::new().with_handler_async(
+                        hyper::Method::GET,
+                        route_stable_instance_stylesheet_get,
+                    ),
+                ),
         )
         .with_child(
             "posts",

@@ -1,3 +1,5 @@
+#![allow(clippy::multiple_crate_versions)]
+
 use serde_derive::{Deserialize, Serialize};
 use std::borrow::Cow;
 
@@ -7,7 +9,8 @@ macro_rules! id_wrapper {
         #[serde(transparent)]
         pub struct $ty(pub i64);
         impl $ty {
-            pub fn raw(&self) -> i64 {
+            #[must_use]
+            pub const fn raw(&self) -> i64 {
                 self.0
             }
         }
@@ -45,6 +48,7 @@ macro_rules! id_wrapper {
 }
 
 id_wrapper!(CommentLocalID);
+id_wrapper!(CollectionTargetLocalID);
 id_wrapper!(CommunityLocalID);
 id_wrapper!(PollLocalID);
 id_wrapper!(PollOptionLocalID);
@@ -104,11 +108,14 @@ pub struct RespUserInfo<'a> {
     pub suspended: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub your_note: Option<Option<JustContentText<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub your_follow: Option<Option<RespYourFollowInfo>>,
 }
 
 #[derive(Serialize, Clone)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum RespNotificationInfo<'a> {
     PostReply {
         reply: RespPostCommentInfo<'a>,
@@ -126,6 +133,9 @@ pub enum RespNotificationInfo<'a> {
         comment: RespPostCommentInfo<'a>,
         post: RespPostListPost<'a>,
     },
+    UserFollow {
+        user: RespMinimalAuthorInfo<'a>,
+    },
 }
 
 #[derive(Serialize, Clone)]
@@ -137,7 +147,7 @@ pub struct RespNotification<'a> {
 }
 
 #[derive(Serialize)]
-pub struct JustID<T: serde::Serialize> {
+pub struct JustID<T> {
     pub id: T,
 }
 
@@ -148,13 +158,14 @@ pub struct MaybeIncludeYour {
 }
 
 #[derive(Serialize, Clone)]
-pub struct RespList<'a, T: serde::Serialize + ToOwned + Clone> {
+pub struct RespList<'a, T: Clone> {
     pub items: Cow<'a, [T]>,
     pub next_page: Option<Cow<'a, str>>,
 }
 
-impl<'a, T: serde::Serialize + ToOwned + Clone> RespList<'a, T> {
-    pub fn empty() -> Self {
+impl<T: Clone> RespList<'_, T> {
+    #[must_use]
+    pub const fn empty() -> Self {
         Self {
             items: Cow::Borrowed(&[]),
             next_page: None,
@@ -206,6 +217,19 @@ pub struct JustUser<'a> {
 }
 
 #[derive(Serialize, Clone)]
+pub struct RespLikeInfo<'a> {
+    pub user: RespMinimalAuthorInfo<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub federation_status: Option<RespFederationStatus>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct RespYourVoteInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub federation_status: Option<RespFederationStatus>,
+}
+
+#[derive(Serialize, Clone)]
 pub struct RespMinimalCommunityInfo<'a> {
     pub id: CommunityLocalID,
     pub name: Cow<'a, str>,
@@ -221,6 +245,22 @@ pub struct RespMinimalPostInfo<'a> {
     pub title: &'a str,
     pub remote_url: Option<Cow<'a, str>>,
     pub sensitive: bool,
+}
+
+#[derive(Serialize, Clone)]
+pub struct RespCommunityLastPostInfo<'a> {
+    #[serde(flatten)]
+    pub base: RespMinimalPostInfo<'a>,
+    pub created: String,
+}
+
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RespFederationStatus {
+    Unsent,
+    Sent,
+    Received,
+    Posted,
 }
 
 #[derive(Serialize, Clone)]
@@ -243,7 +283,9 @@ pub struct RespPostListPost<'a> {
     pub score: i64,
     pub sticky: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub your_vote: Option<Option<Empty>>,
+    pub your_vote: Option<Option<RespYourVoteInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub federation_status: Option<RespFederationStatus>,
     pub sensitive: bool,
 }
 
@@ -273,13 +315,16 @@ pub struct RespPostCommentInfo<'a> {
     pub created: String,
     pub deleted: bool,
     pub local: bool,
-    pub replies: Option<RespList<'a, RespPostCommentInfo<'a>>>,
+    pub replies: Option<RespList<'a, Self>>,
     pub score: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub your_vote: Option<Option<Empty>>,
+    pub your_vote: Option<Option<RespYourVoteInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub federation_status: Option<RespFederationStatus>,
 }
 
-impl<'a> RespPostCommentInfo<'a> {
+impl RespPostCommentInfo<'_> {
+    #[must_use]
     pub fn has_replies(&self) -> Option<bool> {
         self.replies.as_ref().map(|list| !list.items.is_empty())
     }
@@ -287,6 +332,7 @@ impl<'a> RespPostCommentInfo<'a> {
 
 #[derive(Serialize, Clone)]
 #[serde(tag = "type")]
+#[allow(clippy::large_enum_variant)]
 pub enum RespThingInfo<'a> {
     #[serde(rename = "post")]
     Post(RespPostListPost<'a>),
@@ -296,6 +342,8 @@ pub enum RespThingInfo<'a> {
         base: RespMinimalCommentInfo<'a>,
         created: String,
         post: RespMinimalPostInfo<'a>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        federation_status: Option<RespFederationStatus>,
     },
 }
 
@@ -336,6 +384,12 @@ pub struct RespCommunityFeeds {
     pub atom: RespCommunityFeedsType,
 }
 
+#[derive(Serialize, Clone, Copy)]
+pub struct RespCommunityVisibilitySuppression {
+    pub server: bool,
+    pub user: bool,
+}
+
 #[derive(Serialize, Clone)]
 pub struct RespCommunityInfo<'a> {
     #[serde(flatten)]
@@ -348,6 +402,17 @@ pub struct RespCommunityInfo<'a> {
     pub you_are_moderator: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub your_follow: Option<Option<RespYourFollowInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_post: Option<RespCommunityLastPostInfo<'a>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_post_count: Option<i64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_unfollow_status: Option<RespFederationStatus>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility_suppression: Option<RespCommunityVisibilitySuppression>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending_moderation_actions: Option<u32>,
@@ -356,6 +421,8 @@ pub struct RespCommunityInfo<'a> {
 #[derive(Serialize, Clone)]
 pub struct RespYourFollowInfo {
     pub accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub federation_status: Option<RespFederationStatus>,
 }
 
 #[derive(Serialize)]
@@ -408,6 +475,7 @@ pub enum ThingLocalRef {
     Comment(CommentLocalID),
     User(UserLocalID),
     Community(CommunityLocalID),
+    CollectionTarget(CollectionTargetLocalID),
 }
 
 #[derive(Deserialize)]

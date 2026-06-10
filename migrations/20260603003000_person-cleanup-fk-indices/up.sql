@@ -1,0 +1,16 @@
+CREATE INDEX IF NOT EXISTS community_created_by_idx ON community (created_by);
+CREATE INDEX IF NOT EXISTS flag_person_idx ON flag (person);
+CREATE INDEX IF NOT EXISTS forgot_password_key_person_idx ON forgot_password_key (person);
+CREATE INDEX IF NOT EXISTS invitation_created_by_idx ON invitation (created_by);
+CREATE INDEX IF NOT EXISTS invitation_used_by_idx ON invitation (used_by);
+CREATE INDEX IF NOT EXISTS local_community_follow_undo_follower_idx ON local_community_follow_undo (follower);
+CREATE INDEX IF NOT EXISTS local_post_like_undo_person_idx ON local_post_like_undo (person);
+CREATE INDEX IF NOT EXISTS local_reply_like_undo_person_idx ON local_reply_like_undo (person);
+CREATE INDEX IF NOT EXISTS login_person_idx ON login (person);
+CREATE INDEX IF NOT EXISTS media_person_idx ON media (person);
+CREATE INDEX IF NOT EXISTS modlog_event_by_person_idx ON modlog_event (by_person);
+CREATE INDEX IF NOT EXISTS modlog_event_person_idx ON modlog_event (person);
+CREATE INDEX IF NOT EXISTS person_note_target_idx ON person_note (target);
+CREATE INDEX IF NOT EXISTS poll_vote_person_idx ON poll_vote (person);
+CREATE INDEX IF NOT EXISTS post_mention_person_idx ON post_mention (person);
+CREATE INDEX IF NOT EXISTS reply_mention_person_idx ON reply_mention (person);

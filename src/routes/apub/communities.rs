@@ -1,7 +1,7 @@
 use crate::apub_util::{CommunityPostAuthorInfo, CommunityPostInfo};
+use crate::hyper;
 use crate::{CommunityLocalID, ImageHandling, PostLocalID, UserLocalID};
 use activitystreams::prelude::*;
-use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -179,13 +179,13 @@ async fn handler_communities_get(
                         .and_then(|bytes| match std::str::from_utf8(bytes) {
                             Ok(key) => Some(key),
                             Err(err) => {
-                                log::error!("Warning: public_key is not UTF-8: {:?}", err);
+                                log::error!("Warning: public_key is not UTF-8: {err:?}");
                                 None
                             }
                         });
                 let description = match row.get(4) {
                     Some(description_html) => Some(crate::clean_html(description_html, ImageHandling::Preserve)),
-                    None => row.get::<_, Option<&str>>(3).map(|x| v_htmlescape::escape(x).to_string()),
+                    None => row.get::<_, Option<&str>>(3).map(|x| v_htmlescape::escape_fmt(x).to_string()),
                 };
 
                 let mut info = activitystreams::actor::Group::new();
@@ -194,8 +194,9 @@ async fn handler_communities_get(
                     activitystreams::security(),
                 ])
                 .add_context(FEATURED_CONTEXT.clone())
-                .set_id(community_ap_id.deref().clone())
-                .set_name(name.as_ref());
+                .set_id(community_ap_id.clone().into())
+                .set_name(name.as_ref())
+                .set_url(community_ap_id.as_str().to_owned());
 
                 if let Some(description) = description {
                     info.set_summary(description);
@@ -244,7 +245,7 @@ async fn handler_communities_get(
                 let mut resp = hyper::Response::new(body.into());
                 resp.headers_mut().insert(
                     hyper::header::CONTENT_TYPE,
-                    hyper::header::HeaderValue::from_static("application/activity+json"),
+                    hyper::header::HeaderValue::from_static(crate::apub_util::ACTIVITY_TYPE),
                 );
 
                 Ok(resp)
@@ -361,21 +362,17 @@ async fn handler_communities_followers_list(
 
     let row = db
         .query_one(
-            "SELECT COUNT(*) FROM community_follow WHERE community=$1",
+            "SELECT COUNT(*) FROM community_follow WHERE community=$1 AND accepted",
             &[&community_id],
         )
         .await?;
     let count: i64 = row.get(0);
 
-    let body = serde_json::to_vec(&serde_json::json!({
-        "type": "Collection",
-        "totalItems": count,
-    }))?
-    .into();
-
-    Ok(hyper::Response::builder()
-        .header(hyper::header::CONTENT_TYPE, crate::apub_util::ACTIVITY_TYPE)
-        .body(body)?)
+    super::activitypub_collection_summary_response(
+        crate::apub_util::LocalObjectRef::CommunityFollowers(community_id)
+            .to_local_uri(&ctx.host_url_apub),
+        count,
+    )
 }
 
 async fn handler_communities_followers_get(
@@ -413,10 +410,7 @@ async fn handler_communities_followers_get(
             } else {
                 let community_ap_id: Option<&str> = row.get(2);
                 std::str::FromStr::from_str(community_ap_id.ok_or_else(|| {
-                    crate::Error::InternalStr(format!(
-                        "Missing ap_id for community {}",
-                        community_id
-                    ))
+                    crate::Error::InternalStr(format!("Missing ap_id for community {community_id}"))
                 })?)?
             };
 
@@ -481,10 +475,7 @@ async fn handler_communities_followers_join_get(
             } else {
                 let community_ap_id: Option<&str> = row.get(2);
                 std::str::FromStr::from_str(community_ap_id.ok_or_else(|| {
-                    crate::Error::InternalStr(format!(
-                        "Missing ap_id for community {}",
-                        community_id
-                    ))
+                    crate::Error::InternalStr(format!("Missing ap_id for community {community_id}"))
                 })?)?
             };
 
@@ -561,17 +552,13 @@ async fn handler_communities_followers_accept_get(
                     follow_ap_id
                         .ok_or_else(|| {
                             crate::Error::InternalStr(format!(
-                                "Missing ap_id for follow ({} / {})",
-                                community_id, user_id
+                                "Missing ap_id for follow ({community_id} / {user_id})"
                             ))
                         })?
                         .parse()?,
                     follower_ap_id
                         .ok_or_else(|| {
-                            crate::Error::InternalStr(format!(
-                                "Missing ap_id for user ({})",
-                                user_id
-                            ))
+                            crate::Error::InternalStr(format!("Missing ap_id for user ({user_id})"))
                         })?
                         .parse()?,
                 )
@@ -651,7 +638,9 @@ async fn handler_communities_outbox_page_get(
         }
     };
 
-    let sql: &str = &format!("SELECT post.id, post.local, post.ap_id, post.created, author.id, author.local, author.ap_id FROM post LEFT OUTER JOIN person AS author ON (author.id = post.author) WHERE community=$1{} ORDER BY created DESC LIMIT $2", extra_condition);
+    let sql: &str = &format!(
+        "SELECT post.id, post.local, post.ap_id, post.created, author.id, author.local, author.ap_id FROM post LEFT OUTER JOIN person AS author ON (author.id = post.author) WHERE community=$1{extra_condition} ORDER BY created DESC LIMIT $2"
+    );
 
     let rows = db.query(sql, &values[..]).await?;
 

@@ -1,3 +1,4 @@
+use crate::hyper;
 use crate::lang;
 use crate::types::UserLocalID;
 use serde_derive::Deserialize;
@@ -7,7 +8,7 @@ use std::sync::Arc;
 type ForgotPasswordKey = crate::Pineapple;
 
 async fn route_unstable_forgot_password_keys_create(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
@@ -25,7 +26,7 @@ async fn route_unstable_forgot_password_keys_create(
         email_address: Cow<'a, str>,
     }
 
-    let body = hyper::body::to_bytes(req.into_body()).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
     let body: ForgotPasswordBody = serde_json::from_slice(&body)?;
 
     let db = ctx.db_pool.get().await?;
@@ -121,7 +122,7 @@ async fn route_unstable_forgot_password_keys_reset(
 
     let lang = crate::get_lang_for_req(&req);
 
-    let body = hyper::body::to_bytes(req.into_body()).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
     let body: PasswordResetBody = serde_json::from_slice(&body)?;
 
     let mut db = ctx.db_pool.get().await?;

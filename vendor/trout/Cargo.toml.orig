@@ -1,0 +1,24 @@
+[package]
+name = "trout"
+version = "0.4.0"
+authors = ["Colin Reeder <colin@vpzom.click>"]
+edition = "2018"
+license = "MIT"
+description = "Tree-based routing library for HTTP and beyond"
+repository = "https://git.sr.ht/~vpzom/trout"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+default = ["http1"]
+
+[dependencies]
+http = { version = "1", optional = true }
+percent-encoding = "2.1.0"
+
+[dev-dependencies]
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server", "tokio", "http1"] }
+tokio = { version = "1.8.0", features = ["macros", "net", "rt-multi-thread"] }

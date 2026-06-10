@@ -51,3 +51,5 @@ user_email_invalid = آدرس ایمیل مشخص شده نامعتبر است
 user_name_disallowed_chars = نام کاربری حاوی نویسه های غیر مجاز است
 user_no_avatar = آن کاربر آواتار ندارد
 user_suspended_error = این حساب به حالت تعلیق درآمده است
+notification_title_user_follow = New follower
+notification_body_user_follow = { $username } followed you

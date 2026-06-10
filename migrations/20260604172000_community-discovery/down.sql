@@ -1,0 +1,5 @@
+DROP TABLE community_user_visibility_suppression;
+DROP TABLE community_server_visibility_suppression;
+DROP INDEX community_discovery_host_active_idx;
+DROP TABLE community_discovery;
+DROP TABLE community_discovery_server;

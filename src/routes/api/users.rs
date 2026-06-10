@@ -1,15 +1,52 @@
 use super::InvalidPage;
+use crate::hyper;
 use crate::lang;
 use crate::types::{
     CommentLocalID, CommunityLocalID, ImageHandling, JustContentText, JustID, JustURL,
     NotificationSubscriptionCreateQuery, NotificationSubscriptionID, PostLocalID, RespAvatarInfo,
     RespList, RespLoginUserInfo, RespMinimalAuthorInfo, RespMinimalCommentInfo,
     RespMinimalCommunityInfo, RespMinimalPostInfo, RespNotification, RespNotificationInfo,
-    RespPostCommentInfo, RespPostListPost, RespThingInfo, RespUserInfo, UserLocalID,
+    RespPostCommentInfo, RespPostListPost, RespThingInfo, RespUserInfo, RespYourFollowInfo,
+    UserLocalID,
 };
 use serde_derive::Deserialize;
 use std::borrow::Cow;
 use std::sync::Arc;
+
+async fn has_person_follow_table(db: &tokio_postgres::Client) -> Result<bool, crate::Error> {
+    Ok(db
+        .query_one(
+            "SELECT to_regclass('public.person_follow') IS NOT NULL",
+            &[],
+        )
+        .await?
+        .get(0))
+}
+
+fn user_follow_info(
+    target_local: bool,
+    follow_local: bool,
+    accepted: bool,
+    sent: bool,
+    received: bool,
+) -> RespYourFollowInfo {
+    /*
+        User follows share the same visible lifecycle as community follows.
+        The distinction matters for Mastodon-family servers, where a follow can
+        be accepted locally while the remote server still waits for our Accept
+        delivery.
+    */
+    RespYourFollowInfo {
+        accepted,
+        federation_status: super::local_remote_federation_status(
+            follow_local,
+            target_local,
+            accepted,
+            sent,
+            received,
+        ),
+    }
+}
 
 struct MeOrLocalAndAdminResult {
     pub login_user: UserLocalID,
@@ -39,6 +76,63 @@ impl MeOrLocalAndAdminResult {
     }
 }
 
+fn parse_avatar_media_id(avatar: &str) -> Result<i32, crate::Error> {
+    let media_id = avatar.strip_prefix("local-media://").ok_or_else(|| {
+        crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::BAD_REQUEST,
+            "Avatar must be local media",
+        ))
+    })?;
+
+    let media_id: crate::Pineapple = media_id.parse().map_err(|_| {
+        crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::BAD_REQUEST,
+            "Avatar media ID is invalid",
+        ))
+    })?;
+
+    Ok(media_id.as_int())
+}
+
+async fn validate_avatar_media(
+    db: &tokio_postgres::Client,
+    user_id: UserLocalID,
+    avatar: &str,
+) -> Result<(), crate::Error> {
+    let media_id = parse_avatar_media_id(avatar)?;
+
+    let row = db
+        .query_opt(
+            "SELECT mime FROM media WHERE id=$1 AND person=$2",
+            &[&media_id, &user_id],
+        )
+        .await?;
+
+    let Some(row) = row else {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::BAD_REQUEST,
+            "Avatar media was not found for this user",
+        )));
+    };
+
+    let mime: &str = row.get(0);
+    let mime: mime::Mime = mime.parse().map_err(|_| {
+        crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::BAD_REQUEST,
+            "Avatar media has an invalid content type",
+        ))
+    })?;
+
+    if mime.type_() != mime::IMAGE {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::BAD_REQUEST,
+            "Avatar media must be an image",
+        )));
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum UserIDOrMe {
     User(UserLocalID),
@@ -53,70 +147,83 @@ impl UserIDOrMe {
         }
     }
 
-    pub async fn try_resolve(
+    pub fn try_resolve<'a>(
         self,
-        req: &hyper::Request<hyper::Body>,
-        db: &tokio_postgres::Client,
-    ) -> Result<UserLocalID, crate::Error> {
-        match self {
-            UserIDOrMe::User(id) => Ok(id),
-            UserIDOrMe::Me => crate::require_login(req, db).await,
+        req: &impl crate::ReqParts,
+        db: &'a tokio_postgres::Client,
+    ) -> impl std::future::Future<Output = Result<UserLocalID, crate::Error>> + Send + 'a {
+        let login_user = crate::require_login(req, db);
+
+        async move {
+            match self {
+                UserIDOrMe::User(id) => Ok(id),
+                UserIDOrMe::Me => login_user.await,
+            }
         }
     }
 
-    pub async fn require_me(
+    pub fn require_me<'a>(
         self,
-        req: &hyper::Request<hyper::Body>,
-        db: &tokio_postgres::Client,
-    ) -> Result<UserLocalID, crate::Error> {
-        let login_user = crate::require_login(req, db).await?;
-        match self {
-            UserIDOrMe::Me => Ok(login_user),
-            UserIDOrMe::User(id) => {
-                if id == login_user {
-                    Ok(login_user)
-                } else {
-                    Err(crate::Error::UserError(crate::simple_response(
-                        hyper::StatusCode::FORBIDDEN,
-                        "This endpoint is only available for the current user",
-                    )))
+        req: &impl crate::ReqParts,
+        db: &'a tokio_postgres::Client,
+    ) -> impl std::future::Future<Output = Result<UserLocalID, crate::Error>> + Send + 'a {
+        let login_user = crate::require_login(req, db);
+
+        async move {
+            let login_user = login_user.await?;
+            match self {
+                UserIDOrMe::Me => Ok(login_user),
+                UserIDOrMe::User(id) => {
+                    if id == login_user {
+                        Ok(login_user)
+                    } else {
+                        Err(crate::Error::UserError(crate::simple_response(
+                            hyper::StatusCode::FORBIDDEN,
+                            "This endpoint is only available for the current user",
+                        )))
+                    }
                 }
             }
         }
     }
 
-    pub async fn require_me_or_local_and_admin(
+    pub fn require_me_or_local_and_admin<'a>(
         self,
-        req: &hyper::Request<hyper::Body>,
-        db: &tokio_postgres::Client,
-    ) -> Result<MeOrLocalAndAdminResult, crate::Error> {
-        let login_user = crate::require_login(req, db).await?;
-        match self {
-            UserIDOrMe::Me => Ok(MeOrLocalAndAdminResult {
-                login_user,
-                target_user: login_user,
-                is_admin: None,
-            }),
-            UserIDOrMe::User(target_user) => {
-                if target_user == login_user {
-                    Ok(MeOrLocalAndAdminResult {
-                        login_user,
-                        target_user,
-                        is_admin: None,
-                    })
-                } else if crate::is_site_admin(db, login_user).await?
-                    && crate::is_local_user(db, target_user).await?
-                {
-                    Ok(MeOrLocalAndAdminResult {
-                        login_user,
-                        target_user,
-                        is_admin: Some(true),
-                    })
-                } else {
-                    Err(crate::Error::UserError(crate::simple_response(
-                        hyper::StatusCode::FORBIDDEN,
-                        "You do not have permission to do that",
-                    )))
+        req: &impl crate::ReqParts,
+        db: &'a tokio_postgres::Client,
+    ) -> impl std::future::Future<Output = Result<MeOrLocalAndAdminResult, crate::Error>> + Send + 'a
+    {
+        let login_user = crate::require_login(req, db);
+
+        async move {
+            let login_user = login_user.await?;
+            match self {
+                UserIDOrMe::Me => Ok(MeOrLocalAndAdminResult {
+                    login_user,
+                    target_user: login_user,
+                    is_admin: None,
+                }),
+                UserIDOrMe::User(target_user) => {
+                    if target_user == login_user {
+                        Ok(MeOrLocalAndAdminResult {
+                            login_user,
+                            target_user,
+                            is_admin: None,
+                        })
+                    } else if crate::is_site_admin(db, login_user).await?
+                        && crate::is_local_user(db, target_user).await?
+                    {
+                        Ok(MeOrLocalAndAdminResult {
+                            login_user,
+                            target_user,
+                            is_admin: Some(true),
+                        })
+                    } else {
+                        Err(crate::Error::UserError(crate::simple_response(
+                            hyper::StatusCode::FORBIDDEN,
+                            "You do not have permission to do that",
+                        )))
+                    }
                 }
             }
         }
@@ -136,7 +243,7 @@ impl std::str::FromStr for UserIDOrMe {
 }
 
 async fn route_unstable_users_list(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
@@ -158,7 +265,7 @@ async fn route_unstable_users_list(
             return Err(crate::Error::UserError(crate::simple_response(
                 hyper::StatusCode::FORBIDDEN,
                 "User listing is only allowed when filtering by local=true and a username",
-            )))
+            )));
         }
     };
 
@@ -218,6 +325,7 @@ async fn route_unstable_users_list(
                         },
                         suspended: Some(row.get(4)),
                         your_note: None,
+                        your_follow: None,
                     }
                 })
                 .collect::<Vec<_>>(),
@@ -228,14 +336,14 @@ async fn route_unstable_users_list(
 }
 
 async fn route_unstable_users_create(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
     let lang = crate::get_lang_for_req(&req);
     let mut db = ctx.db_pool.get().await?;
 
-    let body = hyper::body::to_bytes(req.into_body()).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
 
     #[derive(Deserialize)]
     struct UsersCreateBody<'a> {
@@ -291,47 +399,45 @@ async fn route_unstable_users_create(
             .await?;
         if row.get(0) {
             Ok(None)
-        } else {
-            if let Some(invitation_key) = body.invitation_key {
-                if row.get(1) {
-                    let invitation_row = match invitation_key.parse::<crate::Pineapple>() {
-                        Ok(invitation_key) => {
-                            db.query_opt(
-                                "SELECT used_by, id FROM invitation WHERE key=$1",
-                                &[&invitation_key.as_int()],
-                            )
-                            .await?
-                        }
-                        Err(_) => None,
-                    };
+        } else if let Some(invitation_key) = body.invitation_key {
+            if row.get(1) {
+                let invitation_row = match invitation_key.parse::<crate::Pineapple>() {
+                    Ok(invitation_key) => {
+                        db.query_opt(
+                            "SELECT used_by, id FROM invitation WHERE key=$1",
+                            &[&invitation_key.as_int()],
+                        )
+                        .await?
+                    }
+                    Err(_) => None,
+                };
 
-                    if let Some(invitation_row) = invitation_row {
-                        if invitation_row.get::<_, Option<i64>>(0).is_some() {
-                            Err(crate::Error::UserError(crate::simple_response(
-                                hyper::StatusCode::FORBIDDEN,
-                                lang.tr(&lang::invitation_already_used()).into_owned(),
-                            )))
-                        } else {
-                            Ok(invitation_row.get(1))
-                        }
-                    } else {
+                if let Some(invitation_row) = invitation_row {
+                    if invitation_row.get::<_, Option<i64>>(0).is_some() {
                         Err(crate::Error::UserError(crate::simple_response(
                             hyper::StatusCode::FORBIDDEN,
-                            lang.tr(&lang::no_such_invitation()).into_owned(),
+                            lang.tr(&lang::invitation_already_used()).into_owned(),
                         )))
+                    } else {
+                        Ok(invitation_row.get(1))
                     }
                 } else {
                     Err(crate::Error::UserError(crate::simple_response(
                         hyper::StatusCode::FORBIDDEN,
-                        lang.tr(&lang::invitations_disabled()).into_owned(),
+                        lang.tr(&lang::no_such_invitation()).into_owned(),
                     )))
                 }
             } else {
                 Err(crate::Error::UserError(crate::simple_response(
                     hyper::StatusCode::FORBIDDEN,
-                    lang.tr(&lang::signup_not_allowed()).into_owned(),
+                    lang.tr(&lang::invitations_disabled()).into_owned(),
                 )))
             }
+        } else {
+            Err(crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::FORBIDDEN,
+                lang.tr(&lang::signup_not_allowed()).into_owned(),
+            )))
         }
     }?;
 
@@ -418,12 +524,13 @@ async fn route_unstable_users_patch(
         description_html: Option<Cow<'a, str>>,
         email_address: Option<Cow<'a, str>>,
         password: Option<String>,
-        avatar: Option<Cow<'a, str>>,
+        #[serde(default, with = "::serde_with::rust::double_option")]
+        avatar: Option<Option<Cow<'a, str>>>,
         suspended: Option<bool>,
         is_bot: Option<bool>,
     }
 
-    let body = hyper::body::to_bytes(req.into_body()).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
     let body: UsersEditBody = serde_json::from_slice(&body)?;
 
     let too_many_description_updates = if body.description_text.is_some() {
@@ -478,14 +585,17 @@ async fn route_unstable_users_patch(
         changes.push(("passhash", arena.alloc(passhash)));
     }
     if let Some(avatar) = &body.avatar {
-        if !avatar.starts_with("local-media://") {
-            return Err(crate::Error::UserError(crate::simple_response(
-                hyper::StatusCode::BAD_REQUEST,
-                "Avatar must be local media",
-            )));
-        }
+        match avatar.as_deref() {
+            None => {
+                changes.push(("avatar", avatar));
+            }
+            Some(avatar) => {
+                validate_avatar_media(&db, user_id, avatar).await?;
 
-        changes.push(("avatar", avatar));
+                let avatar = arena.alloc(avatar.to_owned());
+                changes.push(("avatar", &*avatar));
+            }
+        }
     }
     if let Some(suspended) = &body.suspended {
         me_or_admin.require_admin(&db, &lang).await?;
@@ -542,6 +652,149 @@ async fn route_unstable_users_patch(
         }
 
         trans.commit().await?;
+    }
+
+    Ok(crate::empty_response())
+}
+
+async fn route_unstable_users_follow(
+    params: (UserIDOrMe,),
+    ctx: Arc<crate::RouteContext>,
+    req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (target,) = params;
+
+    let lang = crate::get_lang_for_req(&req);
+    let db = ctx.db_pool.get().await?;
+    let user = crate::require_login(&req, &db).await?;
+
+    #[derive(Deserialize)]
+    struct UsersFollowBody {
+        #[serde(default)]
+        try_wait_for_accept: bool,
+    }
+
+    let body = crate::read_request_body(req.into_body()).await?;
+    let body: UsersFollowBody = serde_json::from_slice(&body)?;
+
+    let target = target.resolve(user);
+    if target == user {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::FORBIDDEN,
+            "You cannot follow yourself.",
+        )));
+    }
+
+    if !has_person_follow_table(&db).await? {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::SERVICE_UNAVAILABLE,
+            "User follow support is not available yet on this server.",
+        )));
+    }
+
+    let row = db
+        .query_opt("SELECT local FROM person WHERE id=$1", &[&target])
+        .await?
+        .ok_or_else(|| {
+            crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::NOT_FOUND,
+                lang.tr(&lang::no_such_user()).into_owned(),
+            ))
+        })?;
+
+    let target_local: bool = row.get(0);
+    let row_count = db
+        .execute(
+            "INSERT INTO person_follow (target, follower, local, ap_id, accepted) VALUES ($1, $2, TRUE, NULL, $3) ON CONFLICT DO NOTHING",
+            &[&target, &user, &target_local],
+        )
+        .await?;
+
+    let output = if target_local {
+        RespYourFollowInfo {
+            accepted: true,
+            federation_status: None,
+        }
+    } else if row_count > 0 {
+        crate::apub_util::spawn_enqueue_send_user_follow(target, user, ctx);
+
+        if body.try_wait_for_accept {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            let row = db
+                .query_one(
+                    "SELECT accepted, local, federation_sent_at IS NOT NULL, federation_received_at IS NOT NULL FROM person_follow WHERE target=$1 AND follower=$2",
+                    &[&target, &user],
+                )
+                .await?;
+
+            user_follow_info(target_local, row.get(1), row.get(0), row.get(2), row.get(3))
+        } else {
+            user_follow_info(target_local, true, false, false, false)
+        }
+    } else {
+        let row = db
+            .query_one(
+                "SELECT accepted, local, federation_sent_at IS NOT NULL, federation_received_at IS NOT NULL FROM person_follow WHERE target=$1 AND follower=$2",
+                &[&target, &user],
+            )
+            .await?;
+
+        user_follow_info(target_local, row.get(1), row.get(0), row.get(2), row.get(3))
+    };
+
+    crate::json_response(&output)
+}
+
+async fn route_unstable_users_unfollow(
+    params: (UserIDOrMe,),
+    ctx: Arc<crate::RouteContext>,
+    req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (target,) = params;
+
+    let mut db = ctx.db_pool.get().await?;
+    let user = crate::require_login(&req, &db).await?;
+
+    if !has_person_follow_table(&db).await? {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::SERVICE_UNAVAILABLE,
+            "User follow support is not available yet on this server.",
+        )));
+    }
+
+    let target = target.resolve(user);
+
+    let new_undo = {
+        let trans = db.transaction().await?;
+
+        let deleted_rows = trans
+            .query(
+                "DELETE FROM person_follow WHERE target=$1 AND follower=$2 RETURNING ap_id",
+                &[&target, &user],
+            )
+            .await?;
+
+        if let Some(row) = deleted_rows.first() {
+            let id = uuid::Uuid::new_v4();
+            let follow_ap_id: Option<&str> = row.get(0);
+            trans
+                .execute(
+                    "INSERT INTO local_user_follow_undo (id, target, follower, follow_ap_id) VALUES ($1, $2, $3, $4)",
+                    &[&id, &target, &user, &follow_ap_id],
+                )
+                .await?;
+
+            trans.commit().await?;
+
+            Some(id)
+        } else {
+            None
+        }
+    };
+
+    if let Some(new_undo) = new_undo {
+        crate::apub_util::spawn_enqueue_send_user_follow_undo(target, user, new_undo, ctx);
     }
 
     Ok(crate::empty_response())
@@ -635,7 +888,13 @@ async fn route_unstable_users_notifications_list(
                 community.deleted,
                 post.sensitive,
                 reply.sensitive,
-                parent_reply.sensitive
+                parent_reply.sensitive,
+                notification_actor.id,
+                notification_actor.username,
+                notification_actor.local,
+                notification_actor.ap_id,
+                notification_actor.avatar,
+                notification_actor.is_bot
                 FROM notification
                     LEFT OUTER JOIN reply ON (reply.id = notification.reply)
                     LEFT OUTER JOIN reply AS parent_reply ON (parent_reply.id = notification.parent_reply)
@@ -646,6 +905,7 @@ async fn route_unstable_users_notifications_list(
                     LEFT OUTER JOIN person AS post_author ON (post_author.id = post.author)
                     LEFT OUTER JOIN person AS parent_reply_author ON (parent_reply_author.id = parent_reply.author)
                     LEFT OUTER JOIN person AS reply_author ON (reply_author.id = reply.author)
+                    LEFT OUTER JOIN person AS notification_actor ON (notification_actor.id = notification.from_user)
                 WHERE notification.to_user = $1
                 AND NOT COALESCE(reply.deleted OR parent_reply.deleted OR post.deleted OR post.deleted, FALSE)
                 ORDER BY created_at DESC LIMIT $2",
@@ -760,10 +1020,13 @@ async fn route_unstable_users_notifications_list(
                     replies_count_total: row.get(28),
                     sticky: row.get(29),
                     your_vote: Some(if row.get(39) {
-                        Some(crate::types::Empty {})
+                        Some(crate::types::RespYourVoteInfo {
+                            federation_status: None,
+                        })
                     } else {
                         None
                     }),
+                    federation_status: None,
                 }
             });
 
@@ -834,7 +1097,9 @@ async fn route_unstable_users_notifications_list(
                     deleted: false,
                     score: row.get(48),
                     your_vote: Some(if row.get::<_, bool>(49) {
-                        Some(crate::types::Empty {})
+                        Some(crate::types::RespYourVoteInfo {
+                            federation_status: None,
+                        })
                     } else {
                         None
                     }),
@@ -847,6 +1112,7 @@ async fn route_unstable_users_notifications_list(
                             next_page: None,
                         })
                     },
+                    federation_status: None,
                 }
             });
 
@@ -918,10 +1184,42 @@ async fn route_unstable_users_notifications_list(
                     score: row.get(46),
                     replies: None,
                     your_vote: Some(if row.get::<_, bool>(47) {
-                        Some(crate::types::Empty {})
+                        Some(crate::types::RespYourVoteInfo {
+                            federation_status: None,
+                        })
                     } else {
                         None
                     }),
+                    federation_status: None,
+                }
+            });
+
+            let notification_actor = row.get::<_, Option<_>>(62).map(|author_id| {
+                let author_id = UserLocalID(author_id);
+                let author_local: bool = row.get(64);
+                let author_ap_id: Option<&str> = row.get(65);
+
+                RespMinimalAuthorInfo {
+                    id: author_id,
+                    username: Cow::Borrowed(row.get(63)),
+                    local: author_local,
+                    host: crate::get_actor_host_or_unknown(
+                        author_local,
+                        author_ap_id,
+                        &ctx.local_hostname,
+                    ),
+                    remote_url: if author_local {
+                        Some(Cow::Owned(String::from(
+                            crate::apub_util::LocalObjectRef::User(author_id)
+                                .to_local_uri(&ctx.host_url_apub),
+                        )))
+                    } else {
+                        author_ap_id.map(Cow::Borrowed)
+                    },
+                    avatar: row.get::<_, Option<&str>>(66).map(|url| RespAvatarInfo {
+                        url: ctx.process_avatar_href(url, author_id).into_owned().into(),
+                    }),
+                    is_bot: row.get(67),
                 }
             });
 
@@ -977,6 +1275,9 @@ async fn route_unstable_users_notifications_list(
                         None
                     }
                 }
+                "user_follow" => {
+                    notification_actor.map(|user| RespNotificationInfo::UserFollow { user })
+                }
                 _ => None,
             };
 
@@ -1008,7 +1309,7 @@ async fn route_unstable_users_notifications_subscriptions_create(
         .get(hyper::header::ACCEPT_LANGUAGE)
         .and_then(|x| x.to_str().ok());
 
-    let body = hyper::body::to_bytes(body).await?;
+    let body = crate::read_request_body(body).await?;
     let body: NotificationSubscriptionCreateQuery = serde_json::from_slice(&body)?;
 
     if body.type_ != "web_push" {
@@ -1048,31 +1349,48 @@ async fn route_unstable_users_get(
     let lang = crate::get_lang_for_req(&req);
     let db = ctx.db_pool.get().await?;
 
-    let your_note_row;
-
-    let (user_id, your_note) = if query.include_your {
+    let (user_id, your_note, your_follow) = if query.include_your {
         let user = crate::require_login(&req, &db).await?;
 
         let user_id = user_id.resolve(user);
 
-        (
-            user_id,
-            Some({
-                your_note_row = db
-                    .query_opt(
-                        "SELECT content_text FROM person_note WHERE author=$1 AND target=$2",
-                        &[&user, &user_id],
-                    )
-                    .await?;
+        let has_person_follow = has_person_follow_table(&db).await?;
+        let your_follow_row = if has_person_follow {
+            db.query_opt(
+                "SELECT person_follow.accepted, person_follow.local, target_user.local, person_follow.federation_sent_at IS NOT NULL, person_follow.federation_received_at IS NOT NULL FROM person_follow, person AS target_user WHERE target_user.id=$1 AND person_follow.target=$1 AND person_follow.follower=$2",
+                &[&user_id, &user],
+            )
+            .await?
+        } else {
+            None
+        };
 
-                your_note_row.as_ref().map(|row| JustContentText {
-                    content_text: Cow::Borrowed(row.get(0)),
-                })
-            }),
-        )
+        let your_note_row = db
+            .query_opt(
+                "SELECT content_text FROM person_note WHERE author=$1 AND target=$2",
+                &[&user, &user_id],
+            )
+            .await?;
+
+        let your_follow = Some(your_follow_row.as_ref().map(|row| RespYourFollowInfo {
+            accepted: row.get(0),
+            federation_status: super::local_remote_federation_status(
+                row.get(1),
+                row.get(2),
+                row.get(0),
+                row.get(3),
+                row.get(4),
+            ),
+        }));
+
+        let your_note = your_note_row.as_ref().map(|row| JustContentText {
+            content_text: Cow::Owned(row.get::<_, &str>(0).to_owned()),
+        });
+
+        (user_id, your_note, your_follow)
     } else {
         let user_id = user_id.try_resolve(&req, &db).await?;
-        (user_id, None)
+        (user_id, None, None)
     };
 
     let row = db
@@ -1132,7 +1450,8 @@ async fn route_unstable_users_get(
             content_html_safe: description_html.map(|x| crate::clean_html(x, query.image_handling)),
         },
         suspended: if local { Some(row.get(6)) } else { None },
-        your_note,
+        your_note: Some(your_note),
+        your_follow,
     };
 
     crate::json_response(&info)
@@ -1150,7 +1469,7 @@ async fn route_unstable_users_your_note_put(
 
     let target_user = target_user.resolve(login_user);
 
-    let body = hyper::body::to_bytes(req.into_body()).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
     let body: JustContentText = serde_json::from_slice(&body)?;
 
     db.execute(
@@ -1215,7 +1534,7 @@ async fn route_unstable_users_things_list(
             }
         })
         .transpose()
-        .map_err(|err| err.into_user_error())?;
+        .map_err(super::InvalidPage::into_user_error)?;
 
     let mut values: Vec<&(dyn postgres_types::ToSql + Sync)> = vec![&user_id, &limit_plus_1];
 
@@ -1237,8 +1556,7 @@ async fn route_unstable_users_things_list(
     };
 
     let sql: &str = &format!(
-        "(SELECT TRUE AS is_post, post.id AS thing_id, post.href, post.title, post.created, community.id, community.name, community.local, community.ap_id, (SELECT COUNT(*) FROM post_like WHERE post_like.post = post.id), (SELECT COUNT(*) FROM reply WHERE reply.post = post.id), post.sticky, post.ap_id, post.local, post.content_html, post.content_text, post.content_markdown, community.deleted, post.sensitive FROM post, community WHERE post.community = community.id AND post.author = $1 AND NOT post.deleted ORDER BY created DESC LIMIT $2) UNION ALL (SELECT FALSE AS is_post, reply.id AS thing_id, reply.content_text, reply.content_html, reply.created, post.id, post.title, NULL, reply.ap_id, NULL, NULL, reply.local, post.ap_id, post.local, NULL, NULL, NULL, reply.sensitive, post.sensitive FROM reply, post WHERE post.id = reply.post AND reply.author = $1 AND NOT reply.deleted ORDER BY created DESC LIMIT $2){} ORDER BY created DESC, is_post ASC, thing_id DESC LIMIT $2",
-        page_conditions,
+        "(SELECT TRUE AS is_post, post.id AS thing_id, post.href, post.title, post.created, community.id, community.name, community.local, community.ap_id, (SELECT COUNT(*) FROM post_like WHERE post_like.post = post.id), (SELECT COUNT(*) FROM reply WHERE reply.post = post.id), post.sticky, post.ap_id, post.local, post.content_html, post.content_text, post.content_markdown, community.deleted, post.sensitive, post.approved, post.federation_sent_at IS NOT NULL, post.federation_received_at IS NOT NULL, community.local FROM post, community WHERE post.community = community.id AND post.author = $1 AND NOT post.deleted AND NOT community.deleted ORDER BY created DESC LIMIT $2) UNION ALL (SELECT FALSE AS is_post, reply.id AS thing_id, reply.content_text, reply.content_html, reply.created, post.id, post.title, NULL, reply.ap_id, NULL, NULL, reply.local, post.ap_id, post.local, NULL, NULL, NULL, reply.sensitive, post.sensitive, reply.federation_posted_at IS NOT NULL, reply.federation_sent_at IS NOT NULL, reply.federation_received_at IS NOT NULL, community.local FROM reply, post, community WHERE post.id = reply.post AND post.community = community.id AND reply.author = $1 AND NOT reply.deleted ORDER BY created DESC LIMIT $2){page_conditions} ORDER BY created DESC, is_post ASC, thing_id DESC LIMIT $2",
     );
 
     let mut rows = db.query(sql, &values).await?;
@@ -1247,12 +1565,12 @@ async fn route_unstable_users_things_list(
         let row = rows.pop().unwrap();
 
         let ts: chrono::DateTime<chrono::offset::FixedOffset> = row.get(4);
-        let ts = ts.timestamp_nanos();
+        let ts = ts.timestamp_nanos_opt().unwrap();
 
         let is_post: bool = row.get(0);
         let id: i64 = row.get(1);
 
-        Some(format!("{},{},{}", ts, is_post, id))
+        Some(format!("{ts},{is_post},{id}"))
     } else {
         None
     };
@@ -1326,6 +1644,13 @@ async fn route_unstable_users_things_list(
                     sensitive: row.get(18),
                     author: None,
                     your_vote: None,
+                    federation_status: super::local_remote_federation_status(
+                        post_local,
+                        row.get(22),
+                        row.get(19),
+                        row.get(20),
+                        row.get(21),
+                    ),
                 })
             } else {
                 let post_id = PostLocalID(row.get(5));
@@ -1369,6 +1694,13 @@ async fn route_unstable_users_things_list(
                         remote_url: post_remote_url,
                         sensitive: row.get(18),
                     },
+                    federation_status: super::local_remote_federation_status(
+                        comment_local,
+                        row.get(22),
+                        row.get(19),
+                        row.get(20),
+                        row.get(21),
+                    ),
                 }
             }
         })
@@ -1388,6 +1720,16 @@ pub fn route_users() -> crate::RouteNode<()> {
             crate::RouteNode::new()
                 .with_handler_async(hyper::Method::GET, route_unstable_users_get)
                 .with_handler_async(hyper::Method::PATCH, route_unstable_users_patch)
+                .with_child(
+                    "follow",
+                    crate::RouteNode::new()
+                        .with_handler_async(hyper::Method::POST, route_unstable_users_follow),
+                )
+                .with_child(
+                    "unfollow",
+                    crate::RouteNode::new()
+                        .with_handler_async(hyper::Method::POST, route_unstable_users_unfollow),
+                )
                 .with_child(
                     "notifications",
                     crate::RouteNode::new().with_handler_async(
@@ -1413,4 +1755,20 @@ pub fn route_users() -> crate::RouteNode<()> {
                         .with_handler_async(hyper::Method::PUT, route_unstable_users_your_note_put),
                 ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn avatar_media_ids_must_use_local_media_references() {
+        let media_id = crate::Pineapple::generate();
+        let avatar = format!("local-media://{}", media_id.to_string());
+
+        assert_eq!(
+            super::parse_avatar_media_id(&avatar).unwrap(),
+            media_id.as_int()
+        );
+        assert!(super::parse_avatar_media_id("https://example.com/avatar.png").is_err());
+        assert!(super::parse_avatar_media_id("local-media://not-valid").is_err());
+    }
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::print_stdout)]
+
 use std::collections::HashSet;
 use std::io::Write;
 
@@ -8,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = std::env::var("OUT_DIR")?;
 
     {
-        println!("cargo:rerun-if-changed={}", MIGRATIONS_DIR);
+        println!("cargo:rerun-if-changed={MIGRATIONS_DIR}");
 
         let mut out_file =
             std::fs::File::create(std::path::Path::new(&out_dir).join("migrations.rs"))?;
@@ -17,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let paths: Result<Vec<_>, _> = std::fs::read_dir(MIGRATIONS_DIR)?.collect();
         let mut paths = paths?;
 
-        paths.sort_by_cached_key(|entry| entry.file_name());
+        paths.sort_by_cached_key(std::fs::DirEntry::file_name);
 
         for entry in paths {
             let filename = entry.file_name();
@@ -28,17 +30,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             writeln!(
                 out_file,
-                r##"StaticMigration {{ tag: r#"{}"#, up: include_str!(r#"{1}{2}up.sql"#), down: include_str!(r#"{1}{2}down.sql"#) }},"##,
-                tag,
-                path,
-                std::path::MAIN_SEPARATOR
+                r##"StaticMigration {{ tag: "{tag}", up: include_str!(r#"{path}{separator}up.sql"#), down: include_str!(r#"{path}{separator}down.sql"#) }},"##,
+                separator = std::path::MAIN_SEPARATOR
             )?;
         }
 
         write!(out_file, "]")?;
     }
     {
-        println!("cargo:rerun-if-changed={}", DEFAULT_LANG_FILE);
+        println!("cargo:rerun-if-changed={DEFAULT_LANG_FILE}");
 
         let mut out_file =
             std::fs::File::create(std::path::Path::new(&out_dir).join("lang_keys.rs"))?;
@@ -47,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ast = match fluent_syntax::parser::parse_runtime(content.as_ref()) {
             Ok(ast) => ast,
             Err((_, errors)) => {
-                panic!("Failed to load default lang file: {:?}", errors);
+                return Err(format!("Failed to load default lang file: {errors:?}").into());
             }
         };
 
@@ -55,8 +55,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let fluent_syntax::ast::Entry::Message(msg) = entry {
                 let id = msg.id.name;
                 let mut args: Vec<&str> = Vec::new();
-
-                println!("finding arguments for {:?}", msg.value);
 
                 if let Some(value) = msg.value {
                     discover_args_for_pattern(&mut args, &value);
@@ -70,11 +68,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if args.is_empty() {
                     writeln!(
                         out_file,
-                        "pub const fn {0}() -> PlainLangKey {{ PlainLangKey(\"{0}\") }}",
-                        id
+                        "pub const fn {id}() -> PlainLangKey {{ PlainLangKey(\"{id}\") }}"
                     )?;
                 } else {
-                    write!(out_file, "pub fn {}<'a>(", id)?;
+                    write!(out_file, "pub fn {id}<'a>(")?;
 
                     {
                         let mut first = true;
@@ -84,17 +81,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             first = false;
 
-                            write!(out_file, "{}: impl Into<fluent::FluentValue<'a>>", arg)?;
+                            write!(out_file, "{arg}: impl Into<fluent::FluentValue<'a>>")?;
                         }
                     }
 
                     writeln!(out_file, ") -> LangKeyWithArgs<'a> {{")?;
 
-                    write!(
-                        out_file,
-                        "LangKeyWithArgs(\"{}\", fluent::fluent_args![",
-                        id
-                    )?;
+                    write!(out_file, "LangKeyWithArgs(\"{id}\", fluent::fluent_args![")?;
                     {
                         let mut first = true;
                         for arg in args {
@@ -103,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             first = false;
 
-                            write!(out_file, "\"{0}\" => {0}", arg)?;
+                            write!(out_file, "\"{arg}\" => {arg}")?;
                         }
                     }
                     writeln!(out_file, "])")?;
@@ -140,7 +133,7 @@ fn discover_args_for_expression<'a>(
             }
         }
         fluent_syntax::ast::Expression::Inline(expr) => {
-            discover_args_for_inline_expression(target, expr)
+            discover_args_for_inline_expression(target, expr);
         }
     }
 }

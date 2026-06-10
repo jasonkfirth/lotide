@@ -54,3 +54,5 @@ signup_not_allowed = Uzanto-registriĝo estas malebligita sur ĉi tiu servilo
 cannot_block_local = Lokaj objektoj ne blokeblas
 password_empty = Pasvorto ne devas esti malplena
 user_name_empty = Uzantnomo ne devas esti malplena
+notification_title_user_follow = Nova sekvanto
+notification_body_user_follow = { $username } sekvas vin

@@ -2,13 +2,14 @@ use super::{
     InvalidPage, RespAvatarInfo, RespList, RespMinimalAuthorInfo, RespMinimalCommunityInfo,
     RespPostListPost, ValueConsumer,
 };
+use crate::BaseURL;
+use crate::hyper;
 use crate::lang;
 use crate::types::{
-    ActorLocalRef, CommunityLocalID, FlagLocalID, ImageHandling, JustID, JustUser, PollLocalID,
-    PollOptionLocalID, PollVoteBody, PostLocalID, RespPollInfo, RespPollOption, RespPollYourVote,
-    RespPostInfo, UserLocalID,
+    ActorLocalRef, CommunityLocalID, FlagLocalID, ImageHandling, JustID, PollLocalID,
+    PollOptionLocalID, PollVoteBody, PostLocalID, RespLikeInfo, RespPollInfo, RespPollOption,
+    RespPollYourVote, RespPostInfo, UserLocalID,
 };
-use crate::BaseURL;
 use serde_derive::Deserialize;
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -17,8 +18,11 @@ use std::sync::Arc;
 
 mod replies;
 
+const POST_LIST_FROM_AND_FILTER_SQL: &str = " FROM community, post LEFT OUTER JOIN person ON (person.id = post.author) WHERE post.community = community.id AND NOT community.deleted AND post.deleted=FALSE AND post.approved";
+const POST_VOTE_DELIVERY_TARGET_SQL: &str = "SELECT post.local, post.ap_id, community.id, community.local, community.ap_id, COALESCE(community.ap_inbox, community.ap_shared_inbox), COALESCE(post_author.ap_shared_inbox, post_author.ap_inbox), post_author.id, post_author.ap_id FROM post LEFT OUTER JOIN community ON (post.community = community.id) LEFT OUTER JOIN person AS post_author ON (post_author.id = post.author) WHERE post.id = $1";
+
 async fn route_unstable_posts_list(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
@@ -73,7 +77,7 @@ async fn route_unstable_posts_list(
                                 let page: i64 =
                                     super::parse_number_58(page).map_err(|_| InvalidPage)?;
                                 let idx = value_out.push(page);
-                                Ok((None, Some(format!(" OFFSET ${}", idx))))
+                                Ok((None, Some(format!(" OFFSET ${idx}"))))
                             }
                         },
                     }
@@ -164,18 +168,17 @@ async fn route_unstable_posts_list(
         None
     };
 
-    let mut sql = "SELECT post.id, post.author, post.href, post.content_text, post.title, post.created, post.content_markdown, post.content_html, community.id, community.name, community.local, community.ap_id, person.username, person.local, person.ap_id, person.avatar, (SELECT COUNT(*) FROM post_like WHERE post_like.post = post.id), (SELECT COUNT(*) FROM reply WHERE reply.post = post.id), post.sticky, person.is_bot, post.ap_id, post.local, community.deleted, post.sensitive".to_owned();
+    let mut sql = "SELECT post.id, post.author, post.href, post.content_text, post.title, post.created, post.content_markdown, post.content_html, community.id, community.name, community.local, community.ap_id, person.username, person.local, person.ap_id, person.avatar, GREATEST((SELECT COUNT(*) FROM post_like WHERE post_like.post = post.id), post.cached_likes_for_sort), (SELECT COUNT(*) FROM reply WHERE reply.post = post.id), post.sticky, person.is_bot, post.ap_id, post.local, community.deleted, post.sensitive, post.approved, post.federation_sent_at IS NOT NULL, post.federation_received_at IS NOT NULL".to_owned();
     if let Some(idx) = include_your_idx {
         write!(
             sql,
-            ", EXISTS(SELECT 1 FROM post_like WHERE post=post.id AND person=${})",
-            idx
+            ", EXISTS(SELECT 1 FROM post_like WHERE post=post.id AND person=${idx})"
         )
         .unwrap();
     }
 
     let relevance_sql = search_value_idx.map(|search_value_idx| {
-        format!("ts_rank_cd(to_tsvector('english', title || ' ' || COALESCE(content_text, content_markdown, content_html, '')), plainto_tsquery('english', ${}))", search_value_idx)
+        format!("ts_rank_cd(to_tsvector('english', title || ' ' || COALESCE(content_text, content_markdown, content_html, '')), plainto_tsquery('english', ${search_value_idx}))")
     });
 
     let has_relevance = if let Some(relevance_sql) = &relevance_sql {
@@ -187,12 +190,12 @@ async fn route_unstable_posts_list(
         false
     };
 
-    sql.push_str( " FROM community, post LEFT OUTER JOIN person ON (person.id = post.author) WHERE post.community = community.id AND post.deleted=FALSE AND post.approved");
+    sql.push_str(POST_LIST_FROM_AND_FILTER_SQL);
     if query.use_aggregate_filters {
         sql.push_str(" AND community.hide_posts_from_aggregates=FALSE");
     }
     if let Some(search_value_idx) = &search_value_idx {
-        write!(sql, " AND to_tsvector('english', title || ' ' || COALESCE(content_text, content_markdown, content_html, '')) @@ plainto_tsquery('english', ${})", search_value_idx).unwrap();
+        write!(sql, " AND to_tsvector('english', title || ' ' || COALESCE(content_text, content_markdown, content_html, '')) @@ plainto_tsquery('english', ${search_value_idx})").unwrap();
     }
     if let Some(value) = query.in_any_local_community {
         write!(
@@ -204,14 +207,13 @@ async fn route_unstable_posts_list(
     }
     let maybe_user_id;
     if let Some(value) = query.in_your_follows {
-        let user_idx = match include_your_idx {
-            Some(idx) => idx,
-            None => {
-                let user = crate::require_login(&req, &db).await?;
-                maybe_user_id = user;
-                values.push(&maybe_user_id);
-                values.len()
-            }
+        let user_idx = if let Some(idx) = include_your_idx {
+            idx
+        } else {
+            let user = crate::require_login(&req, &db).await?;
+            maybe_user_id = user;
+            values.push(&maybe_user_id);
+            values.len()
         };
 
         write!(
@@ -223,7 +225,7 @@ async fn route_unstable_posts_list(
     }
     if let Some(value) = &query.community {
         values.push(value);
-        write!(sql, " AND community.id=${}", values.len(),).unwrap();
+        write!(sql, " AND community.id=${}", values.len()).unwrap();
     }
     if let Some(value) = &created_within {
         values.push(value);
@@ -268,7 +270,7 @@ async fn route_unstable_posts_list(
         PostsListSortType::Normal(ty) => sql.push_str(ty.post_sort_sql()),
         PostsListSortType::Extra(PostsListExtraSortType::Relevant) => {
             if let Some(relevance_sql) = relevance_sql {
-                write!(sql, "{} DESC, post.id DESC", relevance_sql).unwrap();
+                write!(sql, "{relevance_sql} DESC, post.id DESC").unwrap();
             } else {
                 return Err(crate::Error::UserError(crate::simple_response(
                     hyper::StatusCode::BAD_REQUEST,
@@ -385,21 +387,30 @@ async fn route_unstable_posts_list(
                 sensitive: row.get(23),
                 sticky: row.get(18),
                 relevance: if has_relevance {
-                    row.get(if include_your_idx.is_some() { 25 } else { 24 })
+                    row.get(if include_your_idx.is_some() { 28 } else { 27 })
                 } else {
                     None
                 },
                 remote_url,
                 replies_count_total: Some(row.get(17)),
                 your_vote: if include_your_idx.is_some() {
-                    Some(if row.get(24) {
-                        Some(crate::types::Empty {})
+                    Some(if row.get(27) {
+                        Some(crate::types::RespYourVoteInfo {
+                            federation_status: None,
+                        })
                     } else {
                         None
                     })
                 } else {
                     None
                 },
+                federation_status: super::local_remote_federation_status(
+                    local,
+                    community_local,
+                    row.get(24),
+                    row.get(25),
+                    row.get(26),
+                ),
             };
 
             post
@@ -440,7 +451,7 @@ async fn route_unstable_posts_flags_create(
 
     let user = crate::require_login(&req, &db).await?;
 
-    let body = hyper::body::to_bytes(req.into_body()).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
 
     #[derive(Deserialize)]
     struct PostFlagsCreateBody<'a> {
@@ -483,7 +494,7 @@ async fn route_unstable_posts_flags_create(
         } else {
             post_row
                 .get::<_, Option<&str>>(1)
-                .map(|x| x.parse())
+                .map(str::parse)
                 .transpose()?
         };
 
@@ -502,9 +513,7 @@ async fn route_unstable_posts_flags_create(
                                 .to_local_uri(&ctx.host_url_apub),
                         )
                     } else {
-                        row.get::<_, Option<&str>>(1)
-                            .map(|x| x.parse())
-                            .transpose()?
+                        row.get::<_, Option<&str>>(1).map(str::parse).transpose()?
                     };
 
                     Some(((community_id, community_local, community_ap_id), row.get(2)))
@@ -587,7 +596,7 @@ async fn route_unstable_posts_poll_your_vote_set(
 
     let user = crate::require_login(&req, &db).await?;
 
-    let body = hyper::body::to_bytes(req.into_body()).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
     let body: PollVoteBody = serde_json::from_slice(&body)?;
 
     let row = db.query_opt("SELECT poll.multiple, poll.id, author.local, COALESCE(author.ap_inbox, author.ap_shared_inbox), post.ap_id, COALESCE(poll.is_closed, poll.closed_at <= current_timestamp, FALSE), author.ap_id FROM post INNER JOIN poll ON (poll.id = post.poll_id) LEFT OUTER JOIN person AS author ON (author.id = post.author) WHERE post.id = $1", &[&post_id]).await?.ok_or_else(|| crate::Error::UserError(crate::simple_response(hyper::StatusCode::BAD_REQUEST, "No such poll")))?;
@@ -657,10 +666,7 @@ async fn route_unstable_posts_poll_your_vote_set(
             let inbox: Option<&str> = row.get(3);
             let post_ap_id: Option<String> = row.get(4);
 
-            let author_ap_id = row
-                .get::<_, Option<&str>>(6)
-                .map(|x| x.parse())
-                .transpose()?;
+            let author_ap_id = row.get::<_, Option<&str>>(6).map(str::parse).transpose()?;
 
             if let (Some(inbox), Some(post_ap_id)) = (inbox, post_ap_id) {
                 let inbox = inbox.parse();
@@ -708,7 +714,7 @@ async fn route_unstable_posts_poll_your_vote_set(
                     }
 
                     Ok(())
-                })
+                });
             }
         }
     }
@@ -717,7 +723,7 @@ async fn route_unstable_posts_poll_your_vote_set(
 }
 
 async fn route_unstable_posts_create(
-    _: (),
+    (): (),
     ctx: Arc<crate::RouteContext>,
     req: hyper::Request<hyper::Body>,
 ) -> Result<hyper::Response<hyper::Body>, crate::Error> {
@@ -726,7 +732,7 @@ async fn route_unstable_posts_create(
 
     let user = crate::require_login(&req, &db).await?;
 
-    let body = hyper::body::to_bytes(req.into_body()).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
 
     #[derive(Deserialize)]
     struct PollCreateInfo<'a> {
@@ -801,6 +807,13 @@ async fn route_unstable_posts_create(
         },
     };
 
+    let title = crate::post_title_or_fallback(
+        &body.title,
+        content_text.as_deref(),
+        content_markdown.as_deref(),
+        content_html.as_deref(),
+    );
+
     let community_row = db
         .query_opt(
             "SELECT local FROM community WHERE id=$1 AND NOT deleted",
@@ -816,6 +829,9 @@ async fn route_unstable_posts_create(
 
     let community_local: bool = community_row.get(0);
     let already_approved = community_local;
+
+    super::communities::require_community_interaction_allowed(&db, body.community, user, &lang)
+        .await?;
 
     let (id, created, poll) = {
         let trans = db.transaction().await?;
@@ -840,7 +856,8 @@ async fn route_unstable_posts_create(
                 let poll_id: i64 = row.get(0);
                 let closed_at: chrono::DateTime<chrono::FixedOffset> = row.get(1);
 
-                let indices: Vec<i32> = (0..(poll.options.len() as i32)).collect();
+                let option_count = crate::usize_to_i32(poll.options.len())?;
+                let indices: Vec<i32> = (0..option_count).collect();
                 let mut names: Vec<Option<String>> = poll.options.into_iter().map(Some).collect();
 
                 let rows = trans.query("INSERT INTO poll_option (poll_id, name, position) SELECT $1, * FROM UNNEST($2::TEXT[], $3::INTEGER[]) RETURNING id, position", &[&poll_id, &names, &indices]).await
@@ -862,8 +879,12 @@ async fn route_unstable_posts_create(
                 let mut options = vec![None; rows.len()];
 
                 for row in rows {
-                    let idx: i32 = row.get(1);
-                    let idx = idx as usize;
+                    let idx = crate::i32_to_usize(row.get(1))?;
+                    if idx >= options.len() {
+                        return Err(crate::Error::InternalStrStatic(
+                            "Poll option index returned by database is out of range",
+                        ));
+                    }
 
                     options[idx] = Some(crate::PollOptionOwned {
                         id: PollOptionLocalID(row.get(0)),
@@ -890,7 +911,7 @@ async fn route_unstable_posts_create(
 
         let res_row = trans.query_one(
             "INSERT INTO post (author, href, title, created, community, local, content_text, content_markdown, content_html, approved, poll_id, updated_local, sensitive) VALUES ($1, $2, $3, current_timestamp, $4, TRUE, $5, $6, $7, $8, $9, current_timestamp, $10) RETURNING id, created",
-            &[&user, &body.href, &body.title, &body.community, &content_text, &content_markdown, &content_html, &already_approved, &poll_id, &body.sensitive],
+            &[&user, &body.href, &title, &body.community, &content_text, &content_markdown, &content_html, &already_approved, &poll_id, &body.sensitive],
         ).await?;
 
         let id = PostLocalID(res_row.get(0));
@@ -920,7 +941,7 @@ async fn route_unstable_posts_create(
         content_markdown,
         content_html,
         href: body.href,
-        title: body.title,
+        title,
         created,
         community: body.community,
         poll,
@@ -932,6 +953,8 @@ async fn route_unstable_posts_create(
 
     crate::json_response(&serde_json::json!({ "id": id }))
 }
+
+const POST_GET_SQL: &str = "SELECT post.author, post.href, post.content_text, post.title, post.created, post.content_markdown, post.content_html, community.id, community.name, community.local, community.ap_id, person.username, person.local, person.ap_id, GREATEST((SELECT COUNT(*) FROM post_like WHERE post_like.post = $1), post.cached_likes_for_sort), post.approved, person.avatar, post.local, post.sticky, person.is_bot, post.ap_id, post.local, community.deleted, poll.multiple, (SELECT array_agg(jsonb_build_array(id, name, CASE WHEN post.local THEN (SELECT COUNT(*) FROM poll_vote WHERE poll_id = poll.id AND option_id = poll_option.id) ELSE COALESCE(remote_vote_count, 0) END) ORDER BY position ASC) FROM poll_option WHERE poll_id=poll.id), poll.id, (NOT post.local AND (current_timestamp - post.updated_local) > '1 MINUTE' AND COALESCE(post.updated_local < poll.closed_at, TRUE)), COALESCE(poll.is_closed, poll.closed_at < current_timestamp, FALSE), poll.closed_at, post.rejected, post.sensitive, (SELECT COUNT(*) FROM reply WHERE reply.post = $1), post.federation_sent_at IS NOT NULL, post.federation_received_at IS NOT NULL FROM community, post LEFT OUTER JOIN person ON (person.id = post.author) LEFT OUTER JOIN poll ON (poll.id = post.poll_id) WHERE post.community = community.id AND post.id = $1 AND NOT post.deleted AND NOT community.deleted";
 
 async fn route_unstable_posts_get(
     params: (PostLocalID,),
@@ -964,24 +987,31 @@ async fn route_unstable_posts_get(
     let (post_id,) = params;
 
     let (row, your_vote) = futures::future::try_join(
-        db.query_opt(
-            "SELECT post.author, post.href, post.content_text, post.title, post.created, post.content_markdown, post.content_html, community.id, community.name, community.local, community.ap_id, person.username, person.local, person.ap_id, (SELECT COUNT(*) FROM post_like WHERE post_like.post = $1), post.approved, person.avatar, post.local, post.sticky, person.is_bot, post.ap_id, post.local, community.deleted, poll.multiple, (SELECT array_agg(jsonb_build_array(id, name, CASE WHEN post.local THEN (SELECT COUNT(*) FROM poll_vote WHERE poll_id = poll.id AND option_id = poll_option.id) ELSE COALESCE(remote_vote_count, 0) END) ORDER BY position ASC) FROM poll_option WHERE poll_id=poll.id), poll.id, (NOT post.local AND (current_timestamp - post.updated_local) > '1 MINUTE' AND COALESCE(post.updated_local < poll.closed_at, TRUE)), COALESCE(poll.is_closed, poll.closed_at < current_timestamp, FALSE), poll.closed_at, post.rejected, post.sensitive FROM community, post LEFT OUTER JOIN person ON (person.id = post.author) LEFT OUTER JOIN poll ON (poll.id = post.poll_id) WHERE post.community = community.id AND post.id = $1",
-            &[&post_id],
-        )
-        .map_err(crate::Error::from),
+        db.query_opt(POST_GET_SQL, &[&post_id])
+            .map_err(crate::Error::from),
         async {
             if let Some(user) = include_your_for {
-                let row = db.query_opt("SELECT 1 FROM post_like WHERE post=$1 AND person=$2", &[&post_id, &user]).await?;
-                if row.is_some() {
-                    Ok(Some(Some(crate::types::Empty {})))
-                } else {
-                    Ok(Some(None))
-                }
+                let row = db
+                    .query_opt(
+                        "SELECT post_like.local, post_like.federation_posted_at IS NOT NULL, post_like.federation_sent_at IS NOT NULL, post_like.federation_received_at IS NOT NULL, community.local FROM post_like INNER JOIN post ON post.id=post_like.post INNER JOIN community ON community.id=post.community WHERE post_like.post=$1 AND post_like.person=$2",
+                        &[&post_id, &user],
+                    )
+                    .await?;
+                Ok(Some(row.map(|row| {
+                    super::local_remote_vote_info(
+                        row.get(0),
+                        row.get(4),
+                        row.get(1),
+                        row.get(2),
+                        row.get(3),
+                    )
+                })))
             } else {
                 Ok(None)
             }
-        }
-    ).await?;
+        },
+    )
+    .await?;
 
     match row {
         None => Ok(crate::simple_response(
@@ -1075,7 +1105,7 @@ async fn route_unstable_posts_get(
                         let (tx, rx) = tokio::sync::oneshot::channel();
 
                         let ctx = ctx.clone();
-                        let ap_id = ap_id.parse();
+                        let ap_id = ap_id.parse::<url::Url>();
                         crate::spawn_task(async move {
                             let ap_id = ap_id?;
                             let result = crate::apub_util::fetch_and_ingest(
@@ -1136,7 +1166,7 @@ async fn route_unstable_posts_get(
                                 .map(|(id, name, votes): (i64, &str, i64)| RespPollOption {
                                     id: PollOptionLocalID(id),
                                     name,
-                                    votes: votes as u32,
+                                    votes: crate::i64_to_u32_saturating(votes),
                                 })
                                 .collect(),
                             row.get(27),
@@ -1190,11 +1220,18 @@ async fn route_unstable_posts_get(
                 community: Cow::Owned(community),
                 relevance: None,
                 remote_url,
-                replies_count_total: None,
+                replies_count_total: Some(row.get(31)),
                 score: row.get(14),
                 sensitive: row.get(30),
                 sticky: row.get(18),
                 your_vote,
+                federation_status: super::local_remote_federation_status(
+                    local,
+                    community_local,
+                    row.get(15),
+                    row.get(32),
+                    row.get(33),
+                ),
             };
 
             let output = RespPostInfo {
@@ -1232,18 +1269,16 @@ async fn route_unstable_posts_delete(
         None => Ok(crate::empty_response()), // already gone
         Some(row) => {
             let author = row.get::<_, Option<_>>(0).map(UserLocalID);
-            let is_mod_action = if author != Some(login_user) {
-                if row.get(2) && crate::is_site_admin(&db, login_user).await? {
-                    // still ok
-                    true
-                } else {
-                    return Err(crate::Error::UserError(crate::simple_response(
-                        hyper::StatusCode::FORBIDDEN,
-                        lang.tr(&lang::post_not_yours()).into_owned(),
-                    )));
-                }
-            } else {
+            let is_mod_action = if author == Some(login_user) {
                 false
+            } else if row.get(2) && crate::is_site_admin(&db, login_user).await? {
+                // still ok
+                true
+            } else {
+                return Err(crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::FORBIDDEN,
+                    lang.tr(&lang::post_not_yours()).into_owned(),
+                )));
             };
 
             let actor = author.unwrap_or(login_user);
@@ -1268,7 +1303,7 @@ async fn route_unstable_posts_delete(
                         actor,
                         &ctx.host_url_apub,
                     )?;
-                    let row = db.query_one("SELECT local, ap_id, COALESCE(ap_shared_inbox, ap_inbox) FROM community WHERE id=$1", &[&community]).await?;
+                    let row = db.query_one("SELECT local, ap_id, COALESCE(ap_inbox, ap_shared_inbox) FROM community WHERE id=$1", &[&community]).await?;
 
                     let local = row.get(0);
                     if local {
@@ -1314,11 +1349,37 @@ async fn route_unstable_posts_like(
 
     let user = crate::require_login(&req, &db).await?;
 
+    let lang = crate::get_lang_for_req(&req);
+    let community: i64 = db
+        .query_opt(
+            "SELECT community FROM post WHERE id=$1 AND NOT deleted",
+            &[&post_id],
+        )
+        .await?
+        .ok_or_else(|| {
+            crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::NOT_FOUND,
+                lang.tr(&lang::no_such_post()).into_owned(),
+            ))
+        })?
+        .get(0);
+    super::communities::require_community_interaction_allowed(
+        &db,
+        CommunityLocalID(community),
+        user,
+        &lang,
+    )
+    .await?;
+
+    let like_ap_id =
+        crate::apub_util::fresh_local_post_like_ap_id(post_id, user, &ctx.host_url_apub)?;
+    let like_ap_id_text = like_ap_id.to_string();
+
     let is_new = {
         let mut trans = db.transaction().await?;
         let row_count = trans.execute(
-            "INSERT INTO post_like (post, person, local) VALUES ($1, $2, TRUE) ON CONFLICT (post, person) DO NOTHING",
-            &[&post_id, &user],
+            "INSERT INTO post_like (post, person, local, ap_id) VALUES ($1, $2, TRUE, $3) ON CONFLICT (post, person) DO NOTHING",
+            &[&post_id, &user, &like_ap_id_text],
         ).await?;
 
         let is_new = row_count > 0;
@@ -1334,10 +1395,9 @@ async fn route_unstable_posts_like(
 
     if is_new {
         crate::spawn_task(async move {
-            let row = db.query_opt(
-                "SELECT post.local, post.ap_id, community.id, community.local, community.ap_id, COALESCE(community.ap_shared_inbox, community.ap_inbox), COALESCE(post_author.ap_shared_inbox, post_author.ap_inbox), post_author.id, post_author.ap_id FROM post LEFT OUTER JOIN community ON (post.community = community.id) LEFT OUTER JOIN person AS post_author ON (post_author.id = post.author) WHERE post.id = $1",
-                &[&post_id],
-            ).await?;
+            let row = db
+                .query_opt(POST_VOTE_DELIVERY_TARGET_SQL, &[&post_id])
+                .await?;
             if let Some(row) = row {
                 let post_local = row.get(0);
                 let post_ap_id = if post_local {
@@ -1370,15 +1430,25 @@ async fn route_unstable_posts_like(
                             .into(),
                     )
                 } else {
-                    row.get::<_, Option<&str>>(8)
-                        .map(|x| x.parse())
-                        .transpose()?
+                    row.get::<_, Option<&str>>(8).map(str::parse).transpose()?
+                };
+
+                let community_ap_id = match community_local {
+                    Some(true) => Some(
+                        crate::apub_util::LocalObjectRef::Community(CommunityLocalID(row.get(2)))
+                            .to_local_uri(&ctx.host_url_apub)
+                            .into(),
+                    ),
+                    Some(false) => row.get::<_, Option<&str>>(4).map(str::parse).transpose()?,
+                    None => None,
                 };
 
                 let like = crate::apub_util::local_post_like_to_ap(
                     post_id,
                     post_ap_id,
+                    Some(like_ap_id),
                     author_ap_id,
+                    community_ap_id,
                     user,
                     &ctx.host_url_apub,
                 )?;
@@ -1447,7 +1517,7 @@ async fn route_unstable_posts_likes_list(
             }
         })
         .transpose()
-        .map_err(|_| {
+        .map_err(|()| {
             crate::Error::UserError(crate::simple_response(
                 hyper::StatusCode::BAD_REQUEST,
                 "Invalid page",
@@ -1470,7 +1540,9 @@ async fn route_unstable_posts_likes_list(
         None => "",
     };
 
-    let sql: &str = &format!("SELECT person.id, person.username, person.local, person.ap_id, post_like.created_local, person.avatar, person.is_bot FROM post_like, person WHERE person.id = post_like.person AND post_like.post = $1{} ORDER BY post_like.created_local DESC, post_like.person DESC LIMIT $2", page_conditions);
+    let sql: &str = &format!(
+        "SELECT person.id, person.username, person.local, person.ap_id, post_like.created_local, person.avatar, person.is_bot, post_like.local, post_like.federation_sent_at IS NOT NULL, post_like.federation_received_at IS NOT NULL, post_like.federation_posted_at IS NOT NULL, community.local FROM post_like INNER JOIN person ON person.id = post_like.person INNER JOIN post ON post.id = post_like.post INNER JOIN community ON community.id = post.community WHERE post_like.post = $1{page_conditions} ORDER BY post_like.created_local DESC, post_like.person DESC LIMIT $2"
+    );
 
     let mut rows = db.query(sql, &values).await?;
 
@@ -1478,11 +1550,11 @@ async fn route_unstable_posts_likes_list(
         let row = rows.pop().unwrap();
 
         let ts: chrono::DateTime<chrono::offset::FixedOffset> = row.get(4);
-        let ts = ts.timestamp_nanos();
+        let ts = ts.timestamp_nanos_opt().unwrap();
 
         let u: i64 = row.get(0);
 
-        Some(format!("{},{}", ts, u))
+        Some(format!("{ts},{u}"))
     } else {
         None
     };
@@ -1504,7 +1576,7 @@ async fn route_unstable_posts_likes_list(
                 ap_id.map(Cow::Borrowed)
             };
 
-            JustUser {
+            RespLikeInfo {
                 user: RespMinimalAuthorInfo {
                     id,
                     username: Cow::Borrowed(username),
@@ -1516,6 +1588,13 @@ async fn route_unstable_posts_likes_list(
                         url: ctx.process_avatar_href(url, id),
                     }),
                 },
+                federation_status: super::local_remote_federation_status(
+                    row.get(7),
+                    row.get(11),
+                    row.get(10),
+                    row.get(8),
+                    row.get(9),
+                ),
             }
         })
         .collect::<Vec<_>>();
@@ -1541,27 +1620,27 @@ async fn route_unstable_posts_unlike(
     let new_undo = {
         let mut trans = db.transaction().await?;
 
-        let row_count = trans
-            .execute(
-                "DELETE FROM post_like WHERE post=$1 AND person=$2",
+        let deleted_like = trans
+            .query_opt(
+                "DELETE FROM post_like WHERE post=$1 AND person=$2 RETURNING ap_id",
                 &[&post_id, &user],
             )
             .await?;
 
-        let is_new = row_count > 0;
+        let new_undo = if let Some(deleted_like) = deleted_like {
+            let like_ap_id: Option<String> = deleted_like.get(0);
 
-        let new_undo = if is_new {
             crate::recalculate_cached_post_likes(&mut trans, post_id).await?;
 
             let id = uuid::Uuid::new_v4();
             trans
                 .execute(
-                    "INSERT INTO local_post_like_undo (id, post, person) VALUES ($1, $2, $3)",
-                    &[&id, &post_id, &user],
+                    "INSERT INTO local_post_like_undo (id, post, person, like_ap_id) VALUES ($1, $2, $3, $4)",
+                    &[&id, &post_id, &user, &like_ap_id],
                 )
                 .await?;
 
-            Some(id)
+            Some((id, like_ap_id))
         } else {
             None
         };
@@ -1571,48 +1650,63 @@ async fn route_unstable_posts_unlike(
         new_undo
     };
 
-    if let Some(new_undo) = new_undo {
+    if let Some((new_undo, like_ap_id)) = new_undo {
         crate::spawn_task(async move {
-            let row = db.query_opt(
-                "SELECT post.local, community.id, community.local, community.ap_id, COALESCE(community.ap_shared_inbox, community.ap_inbox), COALESCE(post_author.ap_shared_inbox, post_author.ap_inbox), post_author.id, post_author.ap_id FROM post LEFT OUTER JOIN community ON (post.community = community.id) LEFT OUTER JOIN person AS post_author ON (post_author.id = post.author) WHERE post.id = $1",
-                &[&post_id],
-            ).await?;
+            let row = db
+                .query_opt(POST_VOTE_DELIVERY_TARGET_SQL, &[&post_id])
+                .await?;
             if let Some(row) = row {
                 let post_local: bool = row.get(0);
+                let post_ap_id = if post_local {
+                    crate::apub_util::LocalObjectRef::Post(post_id).to_local_uri(&ctx.host_url_apub)
+                } else {
+                    row.get::<_, &str>(1).parse()?
+                };
 
                 let mut inboxes = HashSet::new();
 
                 if !post_local {
-                    let author_inbox: Option<&str> = row.get(5);
+                    let author_inbox: Option<&str> = row.get(6);
                     if let Some(inbox) = author_inbox {
                         inboxes.insert(inbox);
                     }
                 }
 
-                let community_local: Option<bool> = row.get(2);
+                let community_local: Option<bool> = row.get(3);
 
                 if community_local == Some(false) {
-                    if let Some(inbox) = row.get(4) {
+                    if let Some(inbox) = row.get(5) {
                         inboxes.insert(inbox);
                     }
                 }
 
                 let author_ap_id = if post_local {
                     Some(
-                        crate::apub_util::LocalObjectRef::User(UserLocalID(row.get(6)))
+                        crate::apub_util::LocalObjectRef::User(UserLocalID(row.get(7)))
                             .to_local_uri(&ctx.host_url_apub)
                             .into(),
                     )
                 } else {
-                    row.get::<_, Option<&str>>(7)
-                        .map(|x| x.parse())
-                        .transpose()?
+                    row.get::<_, Option<&str>>(8).map(str::parse).transpose()?
+                };
+
+                let community_ap_id = match community_local {
+                    Some(true) => Some(
+                        crate::apub_util::LocalObjectRef::Community(CommunityLocalID(row.get(2)))
+                            .to_local_uri(&ctx.host_url_apub)
+                            .into(),
+                    ),
+                    Some(false) => row.get::<_, Option<&str>>(4).map(str::parse).transpose()?,
+                    None => None,
                 };
 
                 let undo = crate::apub_util::local_post_like_undo_to_ap(
                     new_undo,
                     post_id,
+                    post_ap_id,
+                    like_ap_id.as_deref().map(str::parse).transpose()?,
                     author_ap_id,
+                    community_ap_id,
                     user,
                     &ctx.host_url_apub,
                 )?;
@@ -1629,7 +1723,7 @@ async fn route_unstable_posts_unlike(
                 }
 
                 if community_local == Some(true) {
-                    let community_local_id = CommunityLocalID(row.get(1));
+                    let community_local_id = CommunityLocalID(row.get(2));
                     crate::apub_util::enqueue_forward_to_community_followers(
                         community_local_id,
                         body,
@@ -1682,4 +1776,43 @@ pub fn route_posts() -> crate::RouteNode<()> {
                         .with_handler_async(hyper::Method::DELETE, route_unstable_posts_unlike),
                 ),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn post_list_filters_deleted_communities() {
+        assert!(super::POST_LIST_FROM_AND_FILTER_SQL.contains("NOT community.deleted"));
+        assert!(super::POST_LIST_FROM_AND_FILTER_SQL.contains("post.deleted=FALSE"));
+    }
+
+    #[test]
+    fn single_post_get_includes_reply_count() {
+        assert!(super::POST_GET_SQL.contains("(SELECT COUNT(*) FROM reply WHERE reply.post = $1)"));
+        assert!(super::POST_GET_SQL.contains("post.sensitive, (SELECT COUNT(*) FROM reply"));
+    }
+
+    #[test]
+    fn single_post_get_includes_cached_remote_score() {
+        assert!(super::POST_GET_SQL.contains("GREATEST((SELECT COUNT(*) FROM post_like"));
+        assert!(super::POST_GET_SQL.contains("post.cached_likes_for_sort"));
+    }
+
+    #[test]
+    fn single_post_get_filters_deleted_posts_and_communities() {
+        assert!(super::POST_GET_SQL.contains("AND NOT post.deleted"));
+        assert!(super::POST_GET_SQL.contains("AND NOT community.deleted"));
+    }
+
+    #[test]
+    fn post_vote_delivery_prefers_explicit_community_inbox() {
+        assert!(
+            super::POST_VOTE_DELIVERY_TARGET_SQL
+                .contains("COALESCE(community.ap_inbox, community.ap_shared_inbox)")
+        );
+        assert!(
+            !super::POST_VOTE_DELIVERY_TARGET_SQL
+                .contains("COALESCE(community.ap_shared_inbox, community.ap_inbox)")
+        );
+    }
 }

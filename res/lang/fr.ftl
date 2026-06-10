@@ -32,3 +32,5 @@ user_email_invalid = L'adresse e-mail n'est pas valide
 user_name_disallowed_chars = Le pseudo contient des caractères interdits
 user_no_avatar = Cet utilisateur n'a pas d'image de profil
 user_suspended_error = Ce compte a été suspendu
+notification_title_user_follow = Nouvel abonne
+notification_body_user_follow = { $username } vous suit
