@@ -6,7 +6,7 @@ pub struct CheckError(pub(crate) Option<IriString>);
 impl std::fmt::Display for CheckError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(iri) = &self.0 {
-            write!(f, "IRI failed host and port check: {}", iri)
+            write!(f, "IRI failed host and port check: {iri}")
         } else {
             write!(f, "IRI missing")
         }

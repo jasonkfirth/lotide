@@ -1484,7 +1484,7 @@ pub trait QuestionExt: AsQuestion {
         I: IntoIterator<Item = T>,
         T: Into<AnyBase>,
     {
-        let many = OneOrMany::from_many(closed.into_iter().map(|t| t.into()).collect());
+        let many = OneOrMany::from_many(closed.into_iter().map(Into::into).collect());
         self.question_mut().closed = Some(Either::Left(many));
         self
     }
@@ -1575,7 +1575,7 @@ pub trait QuestionExt: AsQuestion {
         self.question_mut()
             .closed
             .take()
-            .map(|either| either.map_right(|r| r.map(|date| date.into(), |b| b.into())))
+            .map(|either| either.map_right(|r| r.map(Into::into, Into::into)))
     }
 
     /// Remove the closed field from the current activity

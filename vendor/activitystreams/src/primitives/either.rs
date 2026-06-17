@@ -12,8 +12,7 @@ impl<T> Either<T, T> {
     /// Extract the inner type when Left and Right are the same
     pub fn into_inner(self) -> T {
         match self {
-            Self::Left(t) => t,
-            Self::Right(t) => t,
+            Self::Left(t) | Self::Right(t) => t,
         }
     }
 }

@@ -5,6 +5,9 @@
 - Keep the existing extension wrapper API while allowing Lotide's local
   ActivityStreams conformance tests to exercise extension-bearing documents.
 - Fix example in readme.
+- Clean up extension wrapper construction order for stricter Clippy coverage.
+- Clean up crate metadata and verify the vendored fork with rustdoc warnings
+  denied and doctests enabled.
 
 # 0.1.0-alpha.2
 Fix docs

@@ -16,7 +16,17 @@ version = "0.2.0-alpha.1"
 authors = ["Colin Reeder <colin@vpzom.click>"]
 description = "Implementation-agnostic HTTP Signature helper"
 license = "MIT"
+readme = "README.md"
 repository = "https://git.sr.ht/~vpzom/hancock"
+keywords = [
+    "http-signatures",
+    "activitypub",
+    "federation",
+]
+categories = [
+    "web-programming",
+    "network-programming",
+]
 
 [dependencies.base64]
 version = "0.22.1"

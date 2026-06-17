@@ -321,7 +321,7 @@ impl OneOrMany<AnyString> {
     /// # }
     /// ```
     pub fn single_xsd_string(self) -> Option<String> {
-        self.one().and_then(|any_string| any_string.xsd_string())
+        self.one().and_then(AnyString::xsd_string)
     }
 
     /// Try to take a single RdfLangString from the current object
@@ -340,8 +340,7 @@ impl OneOrMany<AnyString> {
     /// # }
     /// ```
     pub fn single_rdf_lang_string(self) -> Option<RdfLangString> {
-        self.one()
-            .and_then(|any_string| any_string.rdf_lang_string())
+        self.one().and_then(AnyString::rdf_lang_string)
     }
 
     /// Create the object from a single String
@@ -456,7 +455,7 @@ impl OneOrMany<&AnyString> {
             .and_then(|any_string| any_string.as_rdf_lang_string())
     }
 
-    /// Create and owned clone of the OneOrMany<AnyString>
+    /// Create and owned clone of the `OneOrMany<AnyString>`
     ///
     /// ```rust
     /// # use activitystreams::primitives::{OneOrMany, AnyString};

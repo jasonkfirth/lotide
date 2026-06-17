@@ -92,7 +92,7 @@ fn w3c_non_fail_fixtures_parse_as_activitystreams_documents() {
         let fixture = std::fs::read_to_string(&path).expect("fixture must be readable");
 
         if let Err(error) = serde_json::from_str::<AnyBase>(&fixture) {
-            failures.push(format!("{}: {}", name, error));
+            failures.push(format!("{name}: {error}"));
         }
     }
 
@@ -127,7 +127,7 @@ fn w3c_non_fail_fixtures_validate_under_strict_conformance_rules() {
         let fixture = std::fs::read_to_string(&path).expect("fixture must be readable");
 
         if let Err(error) = conformance::validate_activitystreams_json_str(&fixture) {
-            failures.push(format!("{}: {}", name, error));
+            failures.push(format!("{name}: {error}"));
         }
     }
 

@@ -168,7 +168,7 @@ impl<T> OneOrMany<T> {
     /// }
     /// ```
     pub fn as_many(&self) -> Option<&[T]> {
-        self.0.as_ref().right().map(|v| v.as_ref())
+        self.0.as_ref().right().map(AsRef::as_ref)
     }
 
     /// Borrow many as mutable
@@ -187,7 +187,7 @@ impl<T> OneOrMany<T> {
     /// assert_eq!(value.many(), Some(vec![4, 5, 6]));
     /// ```
     pub fn many_mut(&mut self) -> Option<&mut [T]> {
-        self.0.as_mut().right().map(|v| v.as_mut())
+        self.0.as_mut().right().map(AsMut::as_mut)
     }
 
     /// Take a Vec of values
@@ -421,7 +421,7 @@ impl<'a, T> Iterator for Iter<'a, T> {
     }
 }
 
-impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
+impl<T> DoubleEndedIterator for Iter<'_, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self.0 {
             Either::Left(ref mut opt) => opt.take(),
@@ -438,7 +438,7 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
     }
 }
 
-impl<'a, T> std::iter::FusedIterator for Iter<'a, T> {}
+impl<T> std::iter::FusedIterator for Iter<'_, T> {}
 
 impl<'a, T> Iterator for IterMut<'a, T> {
     type Item = &'a mut T;
@@ -481,7 +481,7 @@ impl<'a, T> Iterator for IterMut<'a, T> {
     }
 }
 
-impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
+impl<T> DoubleEndedIterator for IterMut<'_, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self.0 {
             Either::Left(ref mut opt) => opt.take(),
@@ -498,7 +498,7 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
     }
 }
 
-impl<'a, T> std::iter::FusedIterator for IterMut<'a, T> {}
+impl<T> std::iter::FusedIterator for IterMut<'_, T> {}
 
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
@@ -651,13 +651,13 @@ mod tests {
     #[test]
     fn iter_mut_works() {
         let mut single = OneOrMany::from_one(1);
-        for item in single.iter_mut() {
+        for item in &mut single {
             *item += 1;
         }
         assert_eq!(single.as_one(), Some(&2));
 
         let mut many = OneOrMany::from_many(vec![1, 2, 3]);
-        for item in many.iter_mut() {
+        for item in &mut many {
             *item += 1;
         }
         assert_eq!(many.as_many(), Some(&[2, 3, 4][..]));

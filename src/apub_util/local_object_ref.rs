@@ -1,9 +1,9 @@
-use super::{ApIdRef, try_strip_host};
-use crate::BaseURL;
+use super::{try_strip_host, ApIdRef};
 use crate::types::{
     CollectionTargetLocalID, CommentLocalID, CommunityLocalID, PollLocalID, PollOptionLocalID,
     PostLocalID, UserLocalID,
 };
+use crate::BaseURL;
 
 type RefRouteNode<P> = trout::Node<P, String, LocalObjectRef, ()>;
 

@@ -8,6 +8,7 @@ repository = "https://git.asonix.dog/asonix/activitystreams"
 documentation = "https://docs.rs/activitystreams"
 readme = "README.md"
 keywords = ["activitystreams", "activitypub"]
+categories = ["web-programming"]
 edition = "2021"
 
 [lib]

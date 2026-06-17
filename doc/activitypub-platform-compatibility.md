@@ -220,8 +220,8 @@ Compatibility rules:
 - Passive WebFinger on June 4, 2026 resolved `engadget@flipboard.com` to a
   Person actor. Keep magazine URL handling separate from user-actor handling.
 - If a visible Flipboard page advertises an ActivityPub alternate actor link,
-  explicit lookup may follow that link. This verifies the actor surface, not
-  full magazine behavior.
+  explicit lookup may follow that link. This proves the actor surface, not rich
+  magazine semantics.
 - Public magazine pages can advertise `/magazines/...` as
   `rel="alternate"` with `type="application/activity+json"`. Actor and object
   lookup should both follow that link before treating the page as plain HTML.
@@ -457,7 +457,7 @@ Every federation change should keep tests for these paths:
 
 ## Live Audit Notes
 
-2026-06-04 live checks used local user `sj_zero` through the public Lotide API.
+2026-06-04 live checks used local user `local_test_user` through the public Lotide API.
 No remote posts or comments were created. Follow, unfollow, like, and unlike
 operations were restored to their original local state after each probe.
 

@@ -21,6 +21,7 @@ keywords = [
     "activitystreams",
     "activitypub",
 ]
+categories = ["web-programming"]
 license = "GPL-3.0"
 repository = "https://git.asonix.dog/asonix/activitystreams"
 

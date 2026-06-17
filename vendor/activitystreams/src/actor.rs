@@ -670,7 +670,7 @@ pub trait ApActorExt: AsApActor {
         I: IntoIterator<Item = U>,
         U: Into<IriString>,
     {
-        let v: Vec<IriString> = items.into_iter().map(|u| u.into()).collect();
+        let v: Vec<IriString> = items.into_iter().map(Into::into).collect();
         self.ap_actor_mut().streams = Some(v.into());
         self
     }

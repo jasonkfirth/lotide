@@ -116,7 +116,7 @@ pub trait AsBase: markers::Base {
     /// Immutable borrow of `Base<Kind>`
     fn base_ref(&self) -> &Base<Self::Kind>;
 
-    /// Mutable borrow of Base<Kind>
+    /// Mutable borrow of `Base<Kind>`
     fn base_mut(&mut self) -> &mut Base<Self::Kind>;
 }
 
@@ -668,7 +668,7 @@ pub trait BaseExt: AsBase {
     where
         Self::Kind: 'a,
     {
-        self.base_ref().media_type.as_ref().map(|m| m.as_ref())
+        self.base_ref().media_type.as_ref().map(AsRef::as_ref)
     }
 
     /// Set the media type for the current object
@@ -703,7 +703,10 @@ pub trait BaseExt: AsBase {
     /// }
     /// ```
     fn take_media_type(&mut self) -> Option<Mime> {
-        self.base_mut().media_type.take().map(|m| m.into_inner())
+        self.base_mut()
+            .media_type
+            .take()
+            .map(MimeMediaType::into_inner)
     }
 
     /// Delete the media type from the current object
@@ -1005,7 +1008,7 @@ impl<Kind> Base<Kind> {
             name: None,
             media_type: None,
             preview: None,
-            unparsed: Default::default(),
+            unparsed: Unparsed::default(),
         }
     }
 
@@ -1033,7 +1036,7 @@ impl<Kind> Base<Kind> {
             name: None,
             media_type: None,
             preview: None,
-            unparsed: Default::default(),
+            unparsed: Unparsed::default(),
         }
     }
 
@@ -1421,7 +1424,7 @@ impl AnyBase {
     /// assert!(any_base.as_xsd_string().is_some());
     /// ```
     pub fn as_xsd_string(&self) -> Option<&str> {
-        self.0.as_ref().right().map(|r| r.as_str())
+        self.0.as_ref().right().map(String::as_str)
     }
 
     /// Get the object as a `Base<serde_json::Value>`
@@ -1456,7 +1459,7 @@ impl AnyBase {
     /// # }
     /// ```
     pub fn take_xsd_any_uri(self) -> Option<IriString> {
-        self.0.left().and_then(|l| l.id())
+        self.0.left().and_then(IdOrBase::id)
     }
 
     /// Take the String from the Object
@@ -1487,7 +1490,7 @@ impl AnyBase {
     /// # }
     /// ```
     pub fn take_base(self) -> Option<Base<serde_json::Value>> {
-        self.0.left().and_then(|l| l.base())
+        self.0.left().and_then(IdOrBase::base)
     }
 
     /// Replace the object with the provided IriString
@@ -1598,7 +1601,7 @@ impl IdOrBase {
     }
 
     fn as_base(&self) -> Option<&Base<serde_json::Value>> {
-        self.0.as_ref().right().map(|b| b.as_ref())
+        self.0.as_ref().right().map(AsRef::as_ref)
     }
 
     fn id(self) -> Option<IriString> {
@@ -1767,7 +1770,7 @@ impl OneOrMany<AnyBase> {
     /// # }
     /// ```
     pub fn single_xsd_any_uri(self) -> Option<IriString> {
-        self.one().and_then(|inner| inner.take_xsd_any_uri())
+        self.one().and_then(AnyBase::take_xsd_any_uri)
     }
 
     /// Take a single String from the object, if that is what is contained
@@ -1780,7 +1783,7 @@ impl OneOrMany<AnyBase> {
     /// assert!(one.single_xsd_string().is_some());
     /// ```
     pub fn single_xsd_string(self) -> Option<String> {
-        self.one().and_then(|inner| inner.take_xsd_string())
+        self.one().and_then(AnyBase::take_xsd_string)
     }
 
     /// Take a single `Base<serde_json::Value>` from the object, if that is what is contained
@@ -1794,7 +1797,7 @@ impl OneOrMany<AnyBase> {
     /// assert!(one.single_base().is_some());
     /// ```
     pub fn single_base(self) -> Option<Base<serde_json::Value>> {
-        self.one().and_then(|inner| inner.take_base())
+        self.one().and_then(AnyBase::take_base)
     }
 
     /// Create a `OneOrMany<AnyBase>` from a IriString

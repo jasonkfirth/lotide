@@ -2,9 +2,8 @@ use super::InvalidPage;
 use crate::hyper;
 use crate::lang;
 use crate::types::{
-    CommentLocalID, CommunityLocalID, ImageHandling, JustContentText, JustID, JustURL,
-    NotificationSubscriptionCreateQuery, NotificationSubscriptionID, PostLocalID, RespAvatarInfo,
-    RespList, RespLoginUserInfo, RespMinimalAuthorInfo, RespMinimalCommentInfo,
+    CommentLocalID, CommunityLocalID, ImageHandling, JustContentText, JustURL, PostLocalID,
+    RespAvatarInfo, RespList, RespLoginUserInfo, RespMinimalAuthorInfo, RespMinimalCommentInfo,
     RespMinimalCommunityInfo, RespMinimalPostInfo, RespNotification, RespNotificationInfo,
     RespPostCommentInfo, RespPostListPost, RespThingInfo, RespUserInfo, RespYourFollowInfo,
     UserLocalID,
@@ -1053,10 +1052,10 @@ async fn route_unstable_users_notifications_list(
                         },
                         sensitive: row.get(60),
                     },
-                    attachments: match ctx.process_attachments_inner(
-                        row.get::<_, Option<_>>(40).map(Cow::Borrowed),
-                        reply_id,
-                    ) {
+                    attachments: match row
+                        .get::<_, Option<_>>(40)
+                        .map(|href| ctx.process_attachment_href(Cow::Borrowed(href), reply_id))
+                    {
                         None => vec![],
                         Some(href) => vec![JustURL { url: href }],
                     },
@@ -1168,10 +1167,10 @@ async fn route_unstable_users_notifications_list(
                     } else {
                         None
                     },
-                    attachments: match ctx.process_attachments_inner(
-                        row.get::<_, Option<_>>(41).map(Cow::Borrowed),
-                        parent_id,
-                    ) {
+                    attachments: match row
+                        .get::<_, Option<_>>(41)
+                        .map(|href| ctx.process_attachment_href(Cow::Borrowed(href), parent_id))
+                    {
                         None => vec![],
                         Some(href) => vec![JustURL { url: href }],
                     },
@@ -1300,32 +1299,12 @@ async fn route_unstable_users_notifications_subscriptions_create(
 
     let db = ctx.db_pool.get().await?;
 
-    let user_id = user_id.require_me(&req, &db).await?;
+    user_id.require_me(&req, &db).await?;
 
-    let (req_parts, body) = req.into_parts();
-
-    let language = req_parts
-        .headers
-        .get(hyper::header::ACCEPT_LANGUAGE)
-        .and_then(|x| x.to_str().ok());
-
-    let body = crate::read_request_body(body).await?;
-    let body: NotificationSubscriptionCreateQuery = serde_json::from_slice(&body)?;
-
-    if body.type_ != "web_push" {
-        return Err(crate::Error::UserError(crate::simple_response(
-            hyper::StatusCode::BAD_REQUEST,
-            "Unknown subscription type",
-        )));
-    }
-
-    let row = db.query_one(
-        "INSERT INTO person_notification_subscription (person, endpoint, p256dh_key, auth_key, language) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-        &[&user_id, &body.endpoint, &body.p256dh_key, &body.auth_key, &language],
-    ).await?;
-    let id = NotificationSubscriptionID(row.get(0));
-
-    crate::json_response(&JustID { id })
+    Err(crate::Error::UserError(crate::simple_response(
+        hyper::StatusCode::NOT_IMPLEMENTED,
+        "Browser push notifications are not available in this build",
+    )))
 }
 
 async fn route_unstable_users_get(

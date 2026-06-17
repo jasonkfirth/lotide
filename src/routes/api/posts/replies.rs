@@ -292,8 +292,9 @@ async fn get_post_comments<'a>(
                         sensitive,
                     },
 
-                    attachments: match ctx
-                        .process_attachments_inner(row.get::<_, Option<_>>(10).map(Cow::Owned), id)
+                    attachments: match row
+                        .get::<_, Option<_>>(10)
+                        .map(|href| ctx.process_attachment_href(Cow::Owned(href), id))
                     {
                         None => vec![],
                         Some(href) => vec![JustURL { url: href }],

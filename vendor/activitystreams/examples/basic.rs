@@ -17,15 +17,15 @@ fn main() -> Result<(), anyhow::Error> {
         .set_duration(Duration::minutes(4) + Duration::seconds(20))
         .set_shares(iri!("https://example.com/@example/lions/video.webm#shares"));
 
-    println!("Video, {:#?}", video);
+    println!("Video, {video:#?}");
 
     let s = serde_json::to_string(&video)?;
 
-    println!("json, {}", s);
+    println!("json, {s}");
 
     let v: ApObject<Video> = serde_json::from_str(&s)?;
 
-    println!("Video again, {:#?}", v);
+    println!("Video again, {v:#?}");
 
     Ok(())
 }

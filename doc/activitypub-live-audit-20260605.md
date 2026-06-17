@@ -65,22 +65,22 @@ send signed likes, follows, or unfollows.
 | Flipboard | `engadget@flipboard.com` and magazine URL | WebFinger resolves a Person actor; magazine URL not actor JSON | user only | n/a | n/a | Code/product gap. Keep user actor separate from magazine URLs. |
 | Elgg | `activitypubgroup@demo.wzm.me` | Group actor, outbox has announces/create | community `4347767` | posts imported after worker drain | not repeated in this pass | Pass for read import after worker drain. Demo instance remains slow, so fixture coverage is more reliable than depending on it for every test run. |
 | Gancio | `gancio@gancio.cisti.org` | Application actor, outbox has events | community `4451442` | posts imported | no replies expected for event previews | Pass after deployed Application-as-community routing. |
-| Funkwhale | `https://tanukitunes.com/federation/music/libraries/2ac0f854-cc34-40c5-a98e-2bda535a9134` | public `Library` object with owner actor, not a normal group actor | collection target lookup implemented after audit | preview crawler implemented after audit | n/a | Lotide stores Funkwhale libraries as collection targets, sends follows to the owner actor inbox, and stores a bounded preview of Audio items from the library page. |
-| FediGroups | `homelab@fedigroups.social` | Service actor, Mastodon-style outbox announces object URLs | community `4451449` | posts imported after bounded relay preview fetch | replies best-effort from announced objects | Pass for relay read/preview with capped relay object fetches. |
+| Funkwhale | `https://tanukitunes.com/federation/music/libraries/2ac0f854-cc34-40c5-a98e-2bda535a9134` | public `Library` object with owner actor, not a normal group actor | collection target lookup implemented after audit | preview crawler implemented in the next batch | n/a | Backend stores Funkwhale libraries as collection targets, sends follows to the owner actor inbox, and now stores a bounded preview of Audio items from the library page. |
+| FediGroups | `homelab@fedigroups.social` | Service actor, Mastodon-style outbox announces object URLs | community `4451449` | posts imported after bounded relay preview fetch | replies best-effort from announced objects | Pass for relay read/preview after capping relay object fetches. |
 | BuzzRelay | `https://relay.fedi.buzz/tag/activitypub` | Service actor with generated tag inbox and outbox | community `4806425` | empty outbox before follow/use | n/a | Actor resolves and now classifies as `BuzzRelay` relay bot. Treat as opt-in relay, not a broad community-directory source. |
 | Fedibird Group | `playground@gdev.fedibird.com`, `circledev@gdev.fedibird.com` | Group actor, outbox has announces | community `4802932` / older `4347762` | posts imported | comments imported | Preview, Like, and Undo Like pass against announced statuses. The live server sends signed `Reject` for Follow, so this is a remote policy exception until an accepting Fedibird group is found. |
 | Group Actor | `hob@piggo.space` | Service actor, outbox has announces | community `4451454` | posts imported | no replies in sample | Pass after deployed Service-as-community routing. |
 | WordPress ActivityPub | `blog@vivaldi.com` | Group actor at `https://vivaldi.com/?author=0` | community `4347766` | posts imported | not checked | Read pass. Classifier now recognizes WordPress actor paths. |
-| WordPress ActivityPub | redacted WordPress author actor | Person author actor with WordPress ActivityPub routes | community `4591381` | post imported through explicit lookup | target post advertised no replies | Read pass after WordPress blog-publisher actor fix. Signed Like reached the inbox but was rejected while WordPress fetched Lotide's signing-key profile. |
-| WordPress Event Bridge | no live event actor | n/a | n/a | n/a | n/a | Needs a live actor or fixture. |
+| WordPress ActivityPub | `writer@example.com` | Person author actor with WordPress ActivityPub routes | community `4591381` | post imported through explicit lookup | target post advertised no replies | Read pass after WordPress blog-publisher actor fix. Signed Like reached the inbox but was rejected while WordPress fetched Lotide's signing-key profile. |
+| WordPress Event Bridge | no live event actor | n/a | n/a | n/a | n/a | Needs a live actor or source-backed fixture. |
 | Mastodon/Pleroma/Akkoma | profile-only inbound follow class | n/a | n/a | n/a | n/a | Not a group provider. Test inbound follows separately. |
-| Smithereen | no live group actor | n/a | n/a | n/a | n/a | Needs fixtures or a supplied actor. |
+| Smithereen | no live group actor | n/a | n/a | n/a | n/a | Needs source-backed fixtures or a supplied actor. |
 | AP-Groups/chirp | no current chirp.social target | n/a | n/a | n/a | n/a | Use FediGroups for live relay behavior. |
 | Old Guppe | no safe `a.gup.pe` target | n/a | n/a | n/a | n/a | Use FediGroups for live relay behavior. |
 
 ## Code Follow-Up From This Audit
 
-Changes made after the audit:
+Implemented and deployed after the audit:
 
 - `hot_rank` now clamps age and score inputs so future-dated remote posts cannot
   make the public feed return HTTP 500.
@@ -92,14 +92,15 @@ Changes made after the audit:
 - Group-like `Service` and `Application` actors now flow through the remote
   community insert path instead of always becoming person-like users.
 - WordPress blog-publisher `Person` actors now become group-like targets during
-  explicit lookup when they own top-level posts. Author-backed WordPress blogs
-  can then import posts under a remote community row instead of dropping them
-  for lack of a threadiverse community actor.
+  explicit lookup when they own top-level posts. This allows author-backed
+  WordPress blogs such as `writer@example.com` to import posts under a
+  remote community row instead of dropping them for lack of a threadiverse
+  community actor.
 - Local Person and Group actor documents now include an ActivityStreams `url`
-  field alongside `id` and `publicKey`. Some WordPress-style actor importers
-  use that field while fetching profiles and signing keys.
+  field alongside `id` and `publicKey`, which is friendlier to WordPress-style
+  actor importers while preserving the stable ActivityPub actor IDs.
 
-Verification after deployment on the live Lotide host:
+Post-deployment verification on a live test instance:
 
 - `/api/unstable/instance` and `/api/unstable/posts?limit=1` returned HTTP 200.
 - `gancio@gancio.cisti.org` resolved as community `4451442` and imported event
@@ -109,17 +110,17 @@ Verification after deployment on the live Lotide host:
 - `hob@piggo.space` resolved as community `4451454` and imported relay posts.
 - `blog@vivaldi.com` remained a community and its WordPress actor target was
   identified as `WordPress`.
-- A WordPress author actor resolved as community `4591381`, and the WordPress
-  permalink imported as post `530577`.
-- A signed Like to the WordPress inbox failed with
+- `writer@example.com` resolved as community `4591381`, and the example
+  WordPress permalink imported as post `530577` with AP ID
+  `https://example.com/?p=287`.
+- A signed Like to the example WordPress author's WordPress inbox failed with
   `activitypub_signature_verification: No Profile found or Profile not accessible`.
   The same failure reproduced with a cache-busted `keyId` and an `acct:` key ID,
   so the blocker appears to be WordPress' remote fetch of the Lotide actor/key
-  profile rather than the Like activity shape. Public DNS for the tested Lotide host
-  points at a public address, while the Lotide server's own resolver maps the
-  same host to private reverse-proxy addresses; matching resolver behavior on
-  the WordPress host would cause WordPress `wp_safe_remote_get` to reject the
-  actor URL as unsafe.
+  profile rather than the Like activity shape. In this class of failure, check
+  that public DNS and the local resolver both lead WordPress to the same public
+  actor URL; WordPress' safe remote fetch layer can reject private or
+  inconsistent addresses before it validates the activity itself.
 
 Still open:
 
@@ -140,7 +141,7 @@ Still open:
   WordPress blog actor, but no current event bridge actor was found in this
   pass.
 - Signed follow/unfollow/like/unlike was not repeated in this pass. Use the
-  read results here to choose a quiet target per platform before running signed
-  delivery probes.
+  read results here to choose a low-impact target per platform before running
+  signed delivery probes.
 
 <!-- end of activitypub-live-audit-20260605.md -->

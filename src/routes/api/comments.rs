@@ -167,10 +167,10 @@ async fn route_unstable_comments_get(
                         sensitive: row.get(22),
                     },
 
-                    attachments: match ctx.process_attachments_inner(
-                        row.get::<_, Option<_>>(13).map(Cow::Borrowed),
-                        comment_id,
-                    ) {
+                    attachments: match row
+                        .get::<_, Option<_>>(13)
+                        .map(|href| ctx.process_attachment_href(Cow::Borrowed(href), comment_id))
+                    {
                         None => vec![],
                         Some(href) => vec![JustURL { url: href }],
                     },

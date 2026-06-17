@@ -1122,12 +1122,10 @@ async fn route_unstable_posts_get(
                         match tokio::time::timeout(crate::apub_util::INTERACTIVE_FETCH_TIMEOUT, rx)
                             .await
                         {
-                            Err(_) => None,
                             Ok(Ok(Some(crate::apub_util::ingest::IngestResult::Post(info)))) => {
                                 info.poll
                             }
-                            Ok(Ok(_)) => None,
-                            Ok(Err(_)) => None,
+                            Err(_) | Ok(Ok(_) | Err(_)) => None,
                         }
                     } else {
                         None

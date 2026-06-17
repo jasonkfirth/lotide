@@ -90,6 +90,38 @@ SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp), \
 federation_received_at=COALESCE(federation_received_at, current_timestamp), \
 federation_posted_at=COALESCE(federation_posted_at, current_timestamp) \
 WHERE reply=$1 AND person=$2 AND local";
+const REPLY_TARGET_POST_CONTEXT_SQL: &str = "\
+SELECT post.id, NULL::BIGINT, community.id, community.local \
+FROM post \
+INNER JOIN community ON community.id=post.community \
+WHERE post.id=$1 \
+AND NOT post.deleted \
+AND NOT community.deleted \
+FOR KEY SHARE OF post, community";
+const REPLY_TARGET_COMMENT_CONTEXT_SQL: &str = "\
+SELECT reply.post, reply.id, community.id, community.local \
+FROM reply \
+INNER JOIN post ON post.id=reply.post \
+INNER JOIN community ON community.id=post.community \
+WHERE reply.id=$1 \
+AND NOT reply.deleted \
+AND NOT post.deleted \
+AND NOT community.deleted \
+FOR KEY SHARE OF reply, post, community";
+
+#[derive(Debug, Clone, Copy)]
+enum ReplyTarget {
+    Post { id: PostLocalID },
+    Comment { id: CommentLocalID },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReplyTargetContext {
+    post: PostLocalID,
+    parent: Option<CommentLocalID>,
+    community: CommunityLocalID,
+    community_is_local: bool,
+}
 
 async fn mark_local_follow_response(
     db: &tokio_postgres::Client,
@@ -306,6 +338,35 @@ async fn mark_local_post_seen_from_remote(
     Ok(())
 }
 
+async fn reply_target_context<C>(
+    db: &C,
+    target: ReplyTarget,
+) -> Result<Option<ReplyTargetContext>, crate::Error>
+where
+    C: deadpool_postgres::GenericClient + Sync,
+{
+    /*
+        A fetched parent can disappear before the child reply is inserted if
+        cleanup is pruning unfollowed remote threads at the same time. Resolve
+        the full post/community context under a key-share lock so the insert
+        never races into a raw foreign-key error.
+    */
+    let row = match target {
+        ReplyTarget::Post { id } => db.query_opt(REPLY_TARGET_POST_CONTEXT_SQL, &[&id]).await?,
+        ReplyTarget::Comment { id } => {
+            db.query_opt(REPLY_TARGET_COMMENT_CONTEXT_SQL, &[&id])
+                .await?
+        }
+    };
+
+    Ok(row.map(|row| ReplyTargetContext {
+        post: PostLocalID(row.get(0)),
+        parent: row.get::<_, Option<i64>>(1).map(CommentLocalID),
+        community: CommunityLocalID(row.get(2)),
+        community_is_local: row.get(3),
+    }))
+}
+
 async fn mark_local_comment_seen_from_remote(
     db: &tokio_postgres::Client,
     comment_id: CommentLocalID,
@@ -331,9 +392,9 @@ async fn upsert_actor_target_profile(
 ) -> Result<(), crate::Error> {
     /*
         Actor target profiles are a memory of what lotide has learned about a
-        remote actor. A later classifier result can replace an early heuristic,
-        while observed evidence is kept so future code can see why the actor
-        was treated as a group, relay, blog, or profile.
+        remote actor. A later high-confidence classifier result can replace an
+        early heuristic, while observed evidence is kept so future code can see
+        why the actor was treated as a group, relay, blog, or profile.
     */
     let evidence = profile.evidence_json();
     let target = profile.target.as_str();
@@ -3135,17 +3196,6 @@ async fn handle_recieved_reply(
 
     if let Some(last_reply_to) = last_reply_to {
         if let Some(term_ap_id) = last_reply_to.as_xsd_any_uri() {
-            #[derive(Debug)]
-            enum ReplyTarget {
-                Post {
-                    id: PostLocalID,
-                },
-                Comment {
-                    id: CommentLocalID,
-                    post: PostLocalID,
-                },
-            }
-
             let target_is_remote =
                 super::LocalObjectRef::try_from_uri(term_ap_id, &ctx.host_url_apub).is_none();
             let mut target = if let Some(local_id) =
@@ -3154,12 +3204,8 @@ async fn handle_recieved_reply(
                 match local_id {
                     super::LocalObjectRef::Post(post_id) => Some(ReplyTarget::Post { id: post_id }),
                     super::LocalObjectRef::Comment(local_comment_id) => {
-                        let row = db
-                            .query_opt("SELECT post FROM reply WHERE id=$1", &[&local_comment_id])
-                            .await?;
-                        row.map(|row| ReplyTarget::Comment {
+                        Some(ReplyTarget::Comment {
                             id: local_comment_id,
-                            post: PostLocalID(row.get(0)),
                         })
                     }
                     _ => None,
@@ -3169,10 +3215,7 @@ async fn handle_recieved_reply(
                     .query_opt("(SELECT id, post FROM reply WHERE ap_id=$1) UNION (SELECT NULL, id FROM post WHERE ap_id=$1) LIMIT 1", &[&term_ap_id.as_str()])
                     .await?;
                 row.map(|row| match row.get::<_, Option<_>>(0).map(CommentLocalID) {
-                    Some(reply_id) => ReplyTarget::Comment {
-                        id: reply_id,
-                        post: PostLocalID(row.get(1)),
-                    },
+                    Some(reply_id) => ReplyTarget::Comment { id: reply_id },
                     None => ReplyTarget::Post {
                         id: PostLocalID(row.get(1)),
                     },
@@ -3190,16 +3233,7 @@ async fn handle_recieved_reply(
                     Ok(Some(result)) => {
                         target = match result.into_ref() {
                             ThingLocalRef::Post(id) => Some(ReplyTarget::Post { id }),
-                            ThingLocalRef::Comment(id) => {
-                                let row = db
-                                    .query_opt("SELECT post FROM reply WHERE id=$1", &[&id])
-                                    .await?;
-
-                                row.map(|row| ReplyTarget::Comment {
-                                    id,
-                                    post: PostLocalID(row.get(0)),
-                                })
-                            }
+                            ThingLocalRef::Comment(id) => Some(ReplyTarget::Comment { id }),
                             _ => None,
                         };
                     }
@@ -3208,15 +3242,35 @@ async fn handle_recieved_reply(
                         log::warn!(
                             "Failed to fetch reply parent {term_ap_id} while ingesting {object_id}: {err:?}"
                         );
+                        return Err(err);
                     }
                 }
             }
 
             if let Some(target) = target {
-                let (post, parent) = match target {
-                    ReplyTarget::Post { id } => (id, None),
-                    ReplyTarget::Comment { id, post } => (post, Some(id)),
+                let Some(target_context) = reply_target_context(&db, target).await? else {
+                    log::debug!(
+                        "refusing to ingest reply {object_id}; parent target {term_ap_id} is not present"
+                    );
+                    return Ok(None);
                 };
+
+                if !remote_community_post_is_wanted(
+                    target_context.community,
+                    target_context.community_is_local,
+                    found_from.allows_untracked_remote_community(),
+                    ctx.clone(),
+                )
+                .await?
+                {
+                    log::debug!(
+                        "refusing to ingest reply {object_id}; parent target {term_ap_id} belongs to an unfollowed remote community"
+                    );
+                    return Ok(None);
+                }
+
+                let post = target_context.post;
+                let parent = target_context.parent;
 
                 let content_is_html = media_type.is_none() || media_type == Some(&mime::TEXT_HTML);
                 let (content_text, content_html) = if content_is_html {
@@ -3229,6 +3283,13 @@ async fn handle_recieved_reply(
 
                 let row = {
                     let trans = db.transaction().await?;
+                    let Some(target_context) = reply_target_context(&trans, target).await? else {
+                        return Err(crate::Error::InternalStrStatic(
+                            "Reply parent vanished before insert",
+                        ));
+                    };
+                    let post = target_context.post;
+                    let parent = target_context.parent;
                     let row = trans.query_opt(
                         "INSERT INTO reply (post, parent, author, content_text, content_html, created, local, ap_id, attachment_href, sensitive) VALUES ($1, $2, $3, $4, $5, COALESCE($6, current_timestamp), FALSE, $7, $8, $9) ON CONFLICT (ap_id) DO NOTHING RETURNING id",
                         &[&post, &parent, &author, &content_text, &content_html, &created, &object_id.as_str(), &attachment_href, &sensitive],
@@ -3757,10 +3818,12 @@ mod tests {
             .parse::<activitystreams::iri_string::types::IriString>()
             .unwrap();
 
-        assert!(
-            super::require_containment_or_mbin_mirror_source(&object_id, &author, Some(&source_id))
-                .is_ok()
-        );
+        assert!(super::require_containment_or_mbin_mirror_source(
+            &object_id,
+            &author,
+            Some(&source_id)
+        )
+        .is_ok());
     }
 
     #[test]
@@ -3775,10 +3838,12 @@ mod tests {
             .parse::<activitystreams::iri_string::types::IriString>()
             .unwrap();
 
-        assert!(
-            super::require_containment_or_mbin_mirror_source(&object_id, &author, Some(&source_id))
-                .is_err()
-        );
+        assert!(super::require_containment_or_mbin_mirror_source(
+            &object_id,
+            &author,
+            Some(&source_id)
+        )
+        .is_err());
     }
 
     #[test]
@@ -3927,10 +3992,10 @@ mod tests {
             .unwrap();
 
             match (kind, object) {
-                ("Audio", crate::apub_util::KnownObject::Audio(_)) => {}
-                ("Document", crate::apub_util::KnownObject::Document(_)) => {}
-                ("Event", crate::apub_util::KnownObject::Event(_)) => {}
-                ("Video", crate::apub_util::KnownObject::Video(_)) => {}
+                ("Audio", crate::apub_util::KnownObject::Audio(_))
+                | ("Document", crate::apub_util::KnownObject::Document(_))
+                | ("Event", crate::apub_util::KnownObject::Event(_))
+                | ("Video", crate::apub_util::KnownObject::Video(_)) => {}
                 _ => panic!("unexpected object type for {}", kind),
             }
         }
@@ -4124,6 +4189,41 @@ mod tests {
     }
 
     #[test]
+    fn reply_target_context_locks_parent_post_and_community() {
+        for sql in [
+            REPLY_TARGET_POST_CONTEXT_SQL,
+            REPLY_TARGET_COMMENT_CONTEXT_SQL,
+        ] {
+            assert!(sql.contains("INNER JOIN community"));
+            assert!(sql.contains("NOT post.deleted"));
+            assert!(sql.contains("NOT community.deleted"));
+            assert!(sql.contains("FOR KEY SHARE"));
+        }
+
+        assert!(REPLY_TARGET_COMMENT_CONTEXT_SQL.contains("INNER JOIN post"));
+        assert!(REPLY_TARGET_COMMENT_CONTEXT_SQL.contains("NOT reply.deleted"));
+        assert!(REPLY_TARGET_COMMENT_CONTEXT_SQL.contains("OF reply, post, community"));
+        assert!(REPLY_TARGET_POST_CONTEXT_SQL.contains("OF post, community"));
+    }
+
+    #[test]
+    fn reply_ingest_can_check_untracked_remote_community_before_insert() {
+        let target_context = ReplyTargetContext {
+            post: PostLocalID(1),
+            parent: Some(CommentLocalID(2)),
+            community: CommunityLocalID(3),
+            community_is_local: false,
+        };
+
+        assert_eq!(target_context.post, PostLocalID(1));
+        assert_eq!(target_context.parent, Some(CommentLocalID(2)));
+        assert_eq!(target_context.community, CommunityLocalID(3));
+        assert!(!target_context.community_is_local);
+        assert!(REMOTE_COMMUNITY_TRACKING_SQL.contains("community_follow.accepted"));
+        assert!(DELETE_LOCAL_COMMUNITY_FOLLOWS_FOR_UNTRACKED_SQL.contains("RETURNING follower"));
+    }
+
+    #[test]
     fn announce_wrapped_local_likes_are_confirmable() {
         let host_url_apub = "https://lotide.example/apub".parse().unwrap();
         let announce: crate::apub_util::KnownObject = serde_json::from_value(serde_json::json!({
@@ -4256,15 +4356,13 @@ mod tests {
         assert_eq!(
             followlike_id(follow.actor_unchecked())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://mastodon.example/users/alice"
         );
         assert_eq!(
             followlike_id(follow.object())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://lemmy.example/c/rust"
         );
     }
@@ -4294,15 +4392,13 @@ mod tests {
         assert_eq!(
             followlike_id(follow.actor_unchecked())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://pleroma.example/u/bob"
         );
         assert_eq!(
             followlike_id(follow.object())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://community.example/c/sandbox"
         );
     }
@@ -4333,15 +4429,13 @@ mod tests {
         assert_eq!(
             followlike_id(accept.actor_unchecked())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://community.example/c/sandbox"
         );
         assert_eq!(
             followlike_id(accept.object())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://lotide.example/apub/communities/10/followers/1"
         );
     }
@@ -4369,15 +4463,13 @@ mod tests {
         assert_eq!(
             followlike_id(reject.actor_unchecked())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://community.example/c/sandbox"
         );
         assert_eq!(
             followlike_id(reject.object())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://lotide.example/apub/communities/10/followers/1"
         );
     }
@@ -4406,15 +4498,13 @@ mod tests {
         assert_eq!(
             followlike_id(like.actor_unchecked())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://piefed.example/u/alice"
         );
         assert_eq!(
             followlike_id(like.object())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://lotide.example/apub/posts/10"
         );
     }
@@ -4445,15 +4535,13 @@ mod tests {
         assert_eq!(
             followlike_id(undo.actor_unchecked())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://mbin.example/u/alice"
         );
         assert_eq!(
             followlike_id(undo.object())
                 .as_ref()
-                .map(|id| id.as_str())
-                .unwrap_or(""),
+                .map_or("", |id| id.as_str()),
             "https://mbin.example/activities/like/1"
         );
     }

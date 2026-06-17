@@ -154,8 +154,12 @@ async fn route_stable_communities_feed_get(
                 row.get::<_, Option<_>>(7).unwrap_or(&local_url)
             };
 
-            let author_username = row.get(9);
-            let author_ap_id = if row.get(10) {
+            let author_username = row
+                .get::<_, Option<&str>>(9)
+                .unwrap_or("[unknown]")
+                .to_owned();
+            let author_is_local = row.get::<_, Option<bool>>(10).unwrap_or(false);
+            let author_ap_id = if author_is_local {
                 Some(
                     crate::apub_util::LocalObjectRef::User(UserLocalID(row.get(1)))
                         .to_local_uri(&ctx.host_url_apub)
@@ -173,7 +177,7 @@ async fn route_stable_communities_feed_get(
                 name: author_username,
                 email: None,
                 uri: author_ap_id,
-                extensions: Default::default(),
+                extensions: std::collections::BTreeMap::default(),
             });
             entry_builder.published(created);
             entry_builder.link(

@@ -69,7 +69,7 @@ impl std::error::Error for ConformanceError {}
 /// are rejected before semantic validation begins.
 pub fn validate_activitystreams_json_str(input: &str) -> Result<(), ConformanceError> {
     let value = serde_json::from_str(input)
-        .map_err(|error| ConformanceError::new("$", format!("invalid JSON: {}", error)))?;
+        .map_err(|error| ConformanceError::new("$", format!("invalid JSON: {error}")))?;
 
     validate_activitystreams_document(&value)
 }
@@ -176,8 +176,7 @@ fn context_contains_activitystreams(value: &Value) -> bool {
         Value::Object(object) => object
             .get("@vocab")
             .and_then(Value::as_str)
-            .map(is_activitystreams_context)
-            .unwrap_or(false),
+            .is_some_and(is_activitystreams_context),
         _ => false,
     }
 }
@@ -190,8 +189,7 @@ fn is_activitystreams_context(value: &str) -> bool {
 
 fn validate_type(value: &Value, path: &str) -> Result<(), ConformanceError> {
     match value {
-        Value::Null => Ok(()),
-        Value::String(_) => Ok(()),
+        Value::Null | Value::String(_) => Ok(()),
         Value::Array(values) => {
             for (index, value) in values.iter().enumerate() {
                 if !value.is_string() {
@@ -263,8 +261,7 @@ fn validate_object_or_link_value(value: &Value, path: &str) -> Result<(), Confor
 
 fn validate_natural_language_value(value: &Value, path: &str) -> Result<(), ConformanceError> {
     match value {
-        Value::Null => Ok(()),
-        Value::String(_) => Ok(()),
+        Value::Null | Value::String(_) => Ok(()),
         Value::Object(object) => validate_rdf_lang_string(object, path),
         Value::Array(values) => {
             for (index, value) in values.iter().enumerate() {
@@ -434,8 +431,7 @@ fn type_includes(object: &Map<String, Value>, expected: &str) -> bool {
     object
         .get("type")
         .or_else(|| object.get("@type"))
-        .map(|value| value_type_includes(value, expected))
-        .unwrap_or(false)
+        .is_some_and(|value| value_type_includes(value, expected))
 }
 
 fn value_type_includes(value: &Value, expected: &str) -> bool {
@@ -507,11 +503,11 @@ fn is_alphanumeric_len(value: &str, min: usize, max: usize) -> bool {
 }
 
 fn child_path(path: &str, child: &str) -> String {
-    format!("{}.{}", path, child)
+    format!("{path}.{child}")
 }
 
 fn index_path(path: &str, index: usize) -> String {
-    format!("{}[{}]", path, index)
+    format!("{path}[{index}]")
 }
 
 /* end of conformance.rs */

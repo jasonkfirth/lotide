@@ -59,9 +59,9 @@ fn main() -> Result<(), anyhow::Error> {
     person.set_context(context()).add_context(security());
 
     let any_base = person.into_any_base()?;
-    println!("any_base: {:#?}", any_base);
+    println!("any_base: {any_base:#?}");
     let person = ExtendedPerson::from_any_base(any_base)?;
 
-    println!("person: {:#?}", person);
+    println!("person: {person:#?}");
     Ok(())
 }

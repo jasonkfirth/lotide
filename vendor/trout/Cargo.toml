@@ -16,7 +16,14 @@ version = "0.4.0"
 authors = ["Colin Reeder <colin@vpzom.click>"]
 description = "Tree-based routing library for HTTP and beyond"
 license = "MIT"
+readme = "README.md"
 repository = "https://git.sr.ht/~vpzom/trout"
+keywords = [
+    "routing",
+    "http",
+    "tree",
+]
+categories = ["web-programming"]
 [dependencies.http]
 version = "1"
 optional = true

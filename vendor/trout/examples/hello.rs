@@ -3,14 +3,14 @@ use trout::http02::RoutingFailureExtHttp;
 #[tokio::main]
 async fn main() {
     let target_node =
-        trout::Node::new().with_handler_async(hyper::Method::GET, |(target,), _, _| async move {
+        trout::Node::new().with_handler_async(hyper::Method::GET, |(target,), (), _| async move {
             Ok::<_, std::convert::Infallible>(hyper::Response::new(http_body_util::Full::new(
                 bytes::Bytes::from(format!("Hello, {}!", target)),
             )))
         });
 
     let root = trout::Node::new()
-        .with_handler_async(hyper::Method::GET, |_, _, _| async {
+        .with_handler_async(hyper::Method::GET, |(), (), _| async {
             Ok(hyper::Response::new(http_body_util::Full::new(
                 bytes::Bytes::from_static(b"Hello, world!"),
             )))

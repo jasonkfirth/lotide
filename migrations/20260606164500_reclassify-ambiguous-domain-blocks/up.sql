@@ -27,10 +27,11 @@
 WITH ambiguous_host AS (
     SELECT host
     FROM community_discovery_server
-    WHERE (
-        suppressed_reason LIKE '%Error in remote response:%'
-        AND suppressed_reason ~* 'Domain[[:space:]]+[^[:space:]]+[[:space:]]+is[[:space:]]+blocked'
-        AND suppressed_reason !~* 'domain_blocked'
+    WHERE suppressed_reason IN (
+        'Domain lotide.example is blocked',
+        'Domain "lotide.example" is blocked',
+        'Domain lotide.example is blocked by the remote instance',
+        'InternalStr("Error in remote response: {\"error\":\"unknown\",\"message\":\"Domain \\\"lotide.example\\\" is blocked\"}")'
     )
     OR (
         host IN ('lemmy.blahaj.zone', 'lemmy.dbzer0.com')
@@ -43,9 +44,12 @@ WITH ambiguous_host AS (
     FROM community
     INNER JOIN community_server_visibility_suppression
         ON community_server_visibility_suppression.community=community.id
-    WHERE community_server_visibility_suppression.reason LIKE '%Error in remote response:%'
-    AND community_server_visibility_suppression.reason ~* 'Domain[[:space:]]+[^[:space:]]+[[:space:]]+is[[:space:]]+blocked'
-    AND community_server_visibility_suppression.reason !~* 'domain_blocked'
+    WHERE community_server_visibility_suppression.reason IN (
+        'Domain lotide.example is blocked',
+        'Domain "lotide.example" is blocked',
+        'Domain lotide.example is blocked by the remote instance',
+        'InternalStr("Error in remote response: {\"error\":\"unknown\",\"message\":\"Domain \\\"lotide.example\\\" is blocked\"}")'
+    )
     AND community.ap_id IS NOT NULL
 
     UNION
@@ -54,9 +58,12 @@ WITH ambiguous_host AS (
     FROM community
     INNER JOIN community_user_visibility_suppression
         ON community_user_visibility_suppression.community=community.id
-    WHERE community_user_visibility_suppression.reason LIKE '%Error in remote response:%'
-    AND community_user_visibility_suppression.reason ~* 'Domain[[:space:]]+[^[:space:]]+[[:space:]]+is[[:space:]]+blocked'
-    AND community_user_visibility_suppression.reason !~* 'domain_blocked'
+    WHERE community_user_visibility_suppression.reason IN (
+        'Domain lotide.example is blocked',
+        'Domain "lotide.example" is blocked',
+        'Domain lotide.example is blocked by the remote instance',
+        'InternalStr("Error in remote response: {\"error\":\"unknown\",\"message\":\"Domain \\\"lotide.example\\\" is blocked\"}")'
+    )
     AND community.ap_id IS NOT NULL
 ), cleared_host AS (
     UPDATE community_discovery_server
@@ -73,17 +80,23 @@ WITH ambiguous_host AS (
     DELETE FROM community_server_visibility_suppression
     USING community
     WHERE community.id=community_server_visibility_suppression.community
-    AND community_server_visibility_suppression.reason LIKE '%Error in remote response:%'
-    AND community_server_visibility_suppression.reason ~* 'Domain[[:space:]]+[^[:space:]]+[[:space:]]+is[[:space:]]+blocked'
-    AND community_server_visibility_suppression.reason !~* 'domain_blocked'
+    AND community_server_visibility_suppression.reason IN (
+        'Domain lotide.example is blocked',
+        'Domain "lotide.example" is blocked',
+        'Domain lotide.example is blocked by the remote instance',
+        'InternalStr("Error in remote response: {\"error\":\"unknown\",\"message\":\"Domain \\\"lotide.example\\\" is blocked\"}")'
+    )
     RETURNING community.id
 ), cleared_user_suppression AS (
     DELETE FROM community_user_visibility_suppression
     USING community
     WHERE community.id=community_user_visibility_suppression.community
-    AND community_user_visibility_suppression.reason LIKE '%Error in remote response:%'
-    AND community_user_visibility_suppression.reason ~* 'Domain[[:space:]]+[^[:space:]]+[[:space:]]+is[[:space:]]+blocked'
-    AND community_user_visibility_suppression.reason !~* 'domain_blocked'
+    AND community_user_visibility_suppression.reason IN (
+        'Domain lotide.example is blocked',
+        'Domain "lotide.example" is blocked',
+        'Domain lotide.example is blocked by the remote instance',
+        'InternalStr("Error in remote response: {\"error\":\"unknown\",\"message\":\"Domain \\\"lotide.example\\\" is blocked\"}")'
+    )
     RETURNING community.id
 )
 UPDATE community_discovery

@@ -25,7 +25,6 @@
     clippy::useless_conversion
 )]
 
-use base64::Engine as _;
 use futures::{Stream, TryStreamExt};
 pub use lotide_types as types;
 use markup5ever_rcdom as rcdom;
@@ -256,8 +255,6 @@ pub struct BaseContext {
     pub apub_proxy_rewrites: bool,
     pub media_storage: Option<MediaStorage>,
     pub api_ratelimit: henry::RatelimitBucket<std::net::IpAddr>,
-    pub vapid_public_key_base64: String,
-    pub vapid_signature_builder: web_push::PartialVapidSignatureBuilder,
     pub break_stuff: bool,
     pub dev_mode: bool,
 
@@ -307,22 +304,21 @@ impl BaseContext {
         href.map(|href| self.process_href(href, post_id))
     }
 
-    pub fn process_attachments_inner<'a>(
+    pub fn process_attachment_href<'a>(
         &self,
-        href: Option<Cow<'a, str>>,
+        href: impl Into<Cow<'a, str>>,
         comment_id: CommentLocalID,
-    ) -> Option<Cow<'a, str>> {
-        href.map(|href| {
-            if href.starts_with("local-media://") {
-                format!(
-                    "{}/stable/comments/{}/attachments/0/href",
-                    self.host_url_api, comment_id
-                )
-                .into()
-            } else {
-                href
-            }
-        })
+    ) -> Cow<'a, str> {
+        let href = href.into();
+        if href.starts_with("local-media://") {
+            format!(
+                "{}/stable/comments/{}/attachments/0/href",
+                self.host_url_api, comment_id
+            )
+            .into()
+        } else {
+            href
+        }
     }
 
     pub fn process_avatar_href<'a>(
@@ -729,7 +725,7 @@ pub fn common_response_builder() -> http::response::Builder {
 pub fn empty_response() -> hyper::Response<hyper::Body> {
     common_response_builder()
         .status(hyper::StatusCode::NO_CONTENT)
-        .body(Default::default())
+        .body(hyper::Body::default())
         .unwrap()
 }
 
@@ -1021,7 +1017,7 @@ pub fn clean_html(src: &str, image_handling: ImageHandling) -> String {
 
             let dom = html5ever::parse_fragment(
                 rcdom::RcDom::default(),
-                Default::default(),
+                html5ever::ParseOpts::default(),
                 // ???
                 html5ever::QualName::new(None, html_ns!(html), html5ever::local_name!("body")),
                 vec![],
@@ -1120,7 +1116,7 @@ pub fn clean_html(src: &str, image_handling: ImageHandling) -> String {
                     html5ever::serialize(
                         &mut output,
                         &rcdom::SerializableHandle::from(output_root),
-                        Default::default(),
+                        html5ever::serialize::SerializeOpts::default(),
                     )
                     .unwrap();
 
@@ -1137,7 +1133,7 @@ pub fn on_add_post(
     is_new: bool, // TODO if not, is this really an "add"?
     ctx: Arc<crate::RouteContext>,
 ) {
-    if let APIDOrLocal::Local = post.ap_id {
+    if post.ap_id == APIDOrLocal::Local {
         apub_util::spawn_enqueue_send_local_post(post.clone(), ctx.clone());
     }
 
@@ -1611,23 +1607,7 @@ async fn configure_s3_media_storage(config: &Config) -> MediaStorage {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
-    let matches = clap::Command::new("lotide")
-        .arg(
-            clap::Arg::new("config")
-                .short('c')
-                .value_name("FILE")
-                .help("Sets a path to a config file")
-                .value_parser(clap::value_parser!(std::ffi::OsString)),
-        )
-        .subcommand(
-            clap::Command::new("migrate").arg(
-                clap::Arg::new("ACTION")
-                    .default_value("up")
-                    .value_parser(["up", "down", "setup"]),
-            ),
-        )
-        .subcommand(clap::Command::new("worker"))
-        .get_matches();
+    let matches = cli_command().get_matches();
 
     let config = Config::load(
         matches
@@ -1644,6 +1624,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         run(config, RunType::Main)
     }
+}
+
+fn cli_command() -> clap::Command {
+    /*
+        Lotide is often run from small shell scripts or service units. The
+        command-line help should therefore document both the subcommands and the
+        environment-backed settings that are otherwise easy to miss.
+    */
+    clap::Command::new("lotide")
+        .version(env!("CARGO_PKG_VERSION"))
+        .about("ActivityPub forum backend")
+        .long_about(
+            "Runs the Lotide backend API, ActivityPub inbox/outbox routes, and \
+background federation worker. Configuration is loaded from environment \
+variables, LOTIDE_* environment variables, and an optional INI file.",
+        )
+        .arg(
+            clap::Arg::new("config")
+                .short('c')
+                .long("config")
+                .value_name("FILE")
+                .help("Read configuration from an INI file")
+                .long_help(
+                    "Read configuration from an INI file after environment \
+sources have been loaded. Values in the file use the same names as the \
+environment variables, such as DATABASE_URL or HOST_URL_API.",
+                )
+                .value_parser(clap::value_parser!(std::ffi::OsString)),
+        )
+        .subcommand(
+            clap::Command::new("migrate")
+                .about("Run database migrations")
+                .long_about(
+                    "Run Lotide's Migrant database migrations. Use this before \
+starting a newly built binary, or after pulling in migrations from an upgrade.",
+                )
+                .arg(
+                    clap::Arg::new("ACTION")
+                        .value_name("ACTION")
+                        .default_value("up")
+                        .help("Migration action to run")
+                        .long_help(
+                            "Migration action to run: up applies pending \
+migrations, down rolls back one migration, and setup creates the migration \
+tracking tables.",
+                        )
+                        .value_parser(["up", "down", "setup"]),
+                ),
+        )
+        .subcommand(
+            clap::Command::new("worker")
+                .about("Run only the background worker")
+                .long_about(
+                    "Run only the task scheduler and worker loop. This is useful \
+when SEPARATE_WORKER=true is used on the main web process and a service manager \
+starts the worker as its own process.",
+                ),
+        )
+        .after_help(
+            "Common environment settings:\n  DATABASE_URL              PostgreSQL connection URL\n  HOST_URL_ACTIVITYPUB      Public ActivityPub base URL, for example https://example/apub\n  HOST_URL_API              Public API base URL, for example https://example/api\n  PORT                      TCP port to listen on, default 3333\n  BIND_ADDRESS              Listen address, default 127.0.0.1\n  MEDIA_LOCATION            Local media directory or S3 bucket name\n\nExamples:\n  lotide -c /etc/lotide.ini migrate\n  lotide -c /etc/lotide.ini\n  lotide -c /etc/lotide.ini worker",
+        )
 }
 
 enum RunType {
@@ -1720,37 +1761,6 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
         );
         log::info!("Database migration status is current");
     }
-
-    let vapid_key: openssl::ec::EcKey<openssl::pkey::Private> = {
-        let db = db_pool.get().await?;
-        let row = db
-            .query_one("SELECT vapid_private_key FROM site WHERE local=TRUE", &[])
-            .await?;
-        if let Some(bytes) = row.get(0) {
-            openssl::ec::EcKey::private_key_from_pem(bytes)?
-        } else {
-            let key = openssl::ec::EcKey::generate(
-                openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1)?
-                    .as_ref(),
-            )?;
-            let private_key_bytes = key.private_key_to_pem()?;
-            db.execute(
-                "UPDATE site SET vapid_private_key=$1 WHERE local=TRUE",
-                &[&private_key_bytes],
-            )
-            .await?;
-
-            key
-        }
-    };
-    log::info!("Loaded web push VAPID key");
-
-    let vapid_signature_builder = web_push::VapidSignatureBuilder::from_pem_no_sub::<&[u8]>(
-        vapid_key.private_key_to_pem()?.as_ref(),
-    )?;
-    let vapid_public_key_base64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(vapid_signature_builder.get_public_key());
-    log::info!("Initialized web push VAPID signer");
 
     let host_url_apub: url::Url = config
         .host_url_activitypub
@@ -1864,8 +1874,6 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
         user_agent: format!("lotide/{}", env!("CARGO_PKG_VERSION")),
         apub_proxy_rewrites: config.apub_proxy_rewrites,
         api_ratelimit: henry::RatelimitBucket::new(300),
-        vapid_public_key_base64,
-        vapid_signature_builder,
 
         worker_trigger: if run_worker {
             Some(worker_trigger.clone())
@@ -1895,13 +1903,7 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                     let listener = tokio::net::TcpListener::bind(listen_addr).await.unwrap();
 
                     loop {
-                        let (stream, remote_addr) = match listener.accept().await {
-                            Ok(connection) => connection,
-                            Err(err) => {
-                                log::warn!("HTTP accept failed: {err}");
-                                continue;
-                            }
-                        };
+                        let (stream, remote_addr) = listener.accept().await.unwrap();
                         let addr_direct = remote_addr.ip();
                         let routes = routes.clone();
                         let context = context.clone();
@@ -1971,7 +1973,7 @@ async fn run(config: Config, run_type: RunType) -> Result<(), Box<dyn std::error
                                                     hyper::header::ACCESS_CONTROL_ALLOW_HEADERS,
                                                     "Content-Type, Authorization",
                                                 )
-                                                .body(Default::default())
+                                                .body(hyper::Body::default())
                                                 .map_err(Into::into)
                                         } else {
                                             match routes.route(req, context) {
@@ -2161,6 +2163,14 @@ mod tests {
         include_str!("../migrations/20260607191000_like-activity-instance-ids/down.sql");
     const SITE_CSS_UP: &str = include_str!("../migrations/20260609002000_site-css/up.sql");
     const SITE_CSS_DOWN: &str = include_str!("../migrations/20260609002000_site-css/down.sql");
+    const TASK_INBOX_PAYLOAD_COMPACTION_UP: &str =
+        include_str!("../migrations/20260615103000_task-inbox-payload-compaction-index/up.sql");
+    const TASK_INBOX_PAYLOAD_COMPACTION_DOWN: &str =
+        include_str!("../migrations/20260615103000_task-inbox-payload-compaction-index/down.sql");
+    const TASK_RETENTION_SETTINGS_UP: &str =
+        include_str!("../migrations/20260616143000_task-retention-settings/up.sql");
+    const TASK_RETENTION_SETTINGS_DOWN: &str =
+        include_str!("../migrations/20260616143000_task-retention-settings/down.sql");
 
     #[test]
     fn db_pool_size_defaults_when_env_value_is_missing_or_invalid() {
@@ -2189,6 +2199,36 @@ mod tests {
             crate::parse_db_pool_max_size(Some("9999")),
             crate::HARD_MAX_DB_POOL_MAX_SIZE
         );
+    }
+
+    #[test]
+    fn cli_help_documents_runtime_configuration() {
+        let mut command = crate::cli_command();
+        let mut help = Vec::new();
+        command.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("Runs the Lotide backend API"));
+        assert!(help.contains("--config <FILE>"));
+        assert!(help.contains("DATABASE_URL"));
+        assert!(help.contains("HOST_URL_ACTIVITYPUB"));
+        assert!(help.contains("BIND_ADDRESS"));
+        assert!(help.contains("lotide -c /etc/lotide.ini worker"));
+    }
+
+    #[test]
+    fn migrate_help_documents_actions() {
+        let mut command = crate::cli_command();
+        let migrate = command
+            .find_subcommand_mut("migrate")
+            .expect("migrate subcommand");
+        let mut help = Vec::new();
+        migrate.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(help.contains("Run Lotide's Migrant database migrations"));
+        assert!(help.contains("up applies pending migrations"));
+        assert!(help.contains("setup creates the migration tracking tables"));
     }
 
     #[tokio::test]
@@ -2290,6 +2330,51 @@ mod tests {
         assert!(TASK_CLEANUP_DOWN.contains("DROP INDEX IF EXISTS task_failed_cleanup_idx"));
         assert!(TASK_CLEANUP_DOWN.contains("DROP INDEX IF EXISTS task_completed_cleanup_idx"));
         assert!(!TASK_CLEANUP_DOWN.contains("CONCURRENTLY"));
+    }
+
+    #[test]
+    fn inbox_payload_compaction_migration_targets_only_completed_inbox_tasks() {
+        assert!(
+            TASK_INBOX_PAYLOAD_COMPACTION_UP
+                .contains("CREATE INDEX IF NOT EXISTS task_completed_inbox_payload_compaction_idx")
+        );
+        assert!(TASK_INBOX_PAYLOAD_COMPACTION_UP.contains("ON task (completed_at)"));
+        assert!(TASK_INBOX_PAYLOAD_COMPACTION_UP.contains("state='completed'"));
+        assert!(TASK_INBOX_PAYLOAD_COMPACTION_UP.contains("ingest_object_from_inbox"));
+        assert!(TASK_INBOX_PAYLOAD_COMPACTION_UP.contains("verify_and_ingest_object_from_inbox"));
+        assert!(TASK_INBOX_PAYLOAD_COMPACTION_UP.contains("params->>'discarded' IS NULL"));
+        assert!(!TASK_INBOX_PAYLOAD_COMPACTION_UP.contains("CONCURRENTLY"));
+
+        assert!(
+            TASK_INBOX_PAYLOAD_COMPACTION_DOWN
+                .contains("DROP INDEX IF EXISTS task_completed_inbox_payload_compaction_idx")
+        );
+        assert!(!TASK_INBOX_PAYLOAD_COMPACTION_DOWN.contains("CONCURRENTLY"));
+    }
+
+    #[test]
+    fn task_retention_settings_migration_bounds_cleanup_controls() {
+        assert!(TASK_RETENTION_SETTINGS_UP.contains("cleanup_completed_task_retention_days"));
+        assert!(TASK_RETENTION_SETTINGS_UP.contains("cleanup_failed_task_retention_days"));
+        assert!(
+            TASK_RETENTION_SETTINGS_UP
+                .contains("cleanup_failed_inbox_task_payload_compaction_hours")
+        );
+        assert!(TASK_RETENTION_SETTINGS_UP.contains("BETWEEN 1 AND 30"));
+        assert!(TASK_RETENTION_SETTINGS_UP.contains("BETWEEN 1 AND 365"));
+        assert!(TASK_RETENTION_SETTINGS_UP.contains("BETWEEN 1 AND 168"));
+
+        assert!(
+            TASK_RETENTION_SETTINGS_DOWN
+                .contains("DROP COLUMN cleanup_completed_task_retention_days")
+        );
+        assert!(
+            TASK_RETENTION_SETTINGS_DOWN.contains("DROP COLUMN cleanup_failed_task_retention_days")
+        );
+        assert!(
+            TASK_RETENTION_SETTINGS_DOWN
+                .contains("DROP COLUMN cleanup_failed_inbox_task_payload_compaction_hours")
+        );
     }
 
     #[test]
@@ -2432,14 +2517,12 @@ mod tests {
 
     #[test]
     fn ambiguous_domain_block_migration_clears_weak_suppressions() {
-        assert!(!RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("ILIKE '%Domain%blocked%'"));
-        assert!(
-            RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("Error in remote response:")
-        );
         assert!(
             RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP
-                .contains("Domain[[:space:]]+[^[:space:]]+[[:space:]]+is")
+                .contains("'Domain \"lotide.example\" is blocked'")
         );
+        assert!(!RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("ILIKE"));
+        assert!(!RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("%Domain%"));
         assert!(RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("lemmy.blahaj.zone"));
         assert!(RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("lemmy.dbzer0.com"));
         assert!(RECLASSIFY_AMBIGUOUS_DOMAIN_BLOCKS_UP.contains("suppressed_reason=NULL"));

@@ -2,7 +2,7 @@ use futures::FutureExt;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use crate::types::{CommunityLocalID, UserLocalID};
+use crate::types::{CollectionTargetLocalID, CommunityLocalID, UserLocalID};
 
 const TASK_DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const TASK_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(1);
@@ -29,8 +29,13 @@ const PG_REPACK_MAX_TABLES: i64 = 2;
     Keep each scheduler pass bounded so discovery does not crowd out outgoing
     federation, previews, or reply fetches.
 */
-const COMMUNITY_DISCOVERY_ENQUEUE_LIMIT: i64 = 100;
+const DEFAULT_COMMUNITY_DISCOVERY_ENQUEUE_LIMIT: i64 = 100;
+const DEFAULT_COMMUNITY_DISCOVERY_REFRESH_INTERVAL_HOURS: i32 = 6;
 const PREVIEW_CACHE_CLEANUP_CRON: &str = "37 19 * * * *";
+const DISCOVERY_SETTINGS_SQL: &str = "\
+SELECT discovery_enqueue_limit, discovery_refresh_interval_hours \
+FROM site \
+WHERE local";
 const CLEANUP_SETTINGS_SQL: &str = "\
 SELECT cleanup_remote_posts_enabled, cleanup_remote_post_retention_days, \
     cleanup_preview_posts_enabled, cleanup_preview_post_retention_hours, \
@@ -39,7 +44,10 @@ SELECT cleanup_remote_posts_enabled, cleanup_remote_post_retention_days, \
     cleanup_remote_interactions_enabled, \
     cleanup_notifications_enabled, cleanup_notification_retention_days, \
     cleanup_failed_inbox_task_payloads_enabled, \
-    cleanup_failed_inbox_task_payload_retention_days \
+    cleanup_failed_inbox_task_payload_retention_days, \
+    cleanup_completed_task_retention_days, \
+    cleanup_failed_task_retention_days, \
+    cleanup_failed_inbox_task_payload_compaction_hours \
 FROM site \
 WHERE local";
 const PG_REPACK_CANDIDATE_TABLES_SQL: &str = "\
@@ -76,20 +84,34 @@ UPDATE task SET state='running', attempted_at=current_timestamp, latest_error=NU
                 ) AND attempts=0 THEN 2 \
                 WHEN kind='fetch_community_outbox' AND params->>'preview'='true' THEN 3 \
                 WHEN kind='fetch_collection_target_preview' THEN 3 \
+                WHEN kind='fetch_remote_post_refresh' AND attempts=0 THEN 4 \
+                WHEN kind='fetch_community_outbox' AND attempts=0 THEN 5 \
+                WHEN kind='deliver_to_inbox' THEN 6 \
+                WHEN kind='verify_and_ingest_object_from_inbox' AND attempts=0 THEN 7 \
+                WHEN kind='fetch_post_replies' AND attempts=0 THEN 7 \
+                WHEN kind='fetch_platform_post_thread' AND attempts=0 THEN 7 \
+                WHEN kind='probe_community_host_interaction' AND attempts=0 THEN 8 \
                 WHEN kind='discover_server_communities' AND attempts=0 \
                     AND EXISTS (\
                         SELECT 1 FROM community_discovery_server \
                         WHERE community_discovery_server.host=task.params->>'host' \
-                        AND community_discovery_server.software IN ('discourse', 'hubzilla', 'friendica')\
-                    ) THEN 4 \
-                WHEN kind='fetch_remote_post_refresh' AND attempts=0 THEN 5 \
-                WHEN kind='fetch_community_outbox' AND attempts=0 THEN 5 \
-                WHEN kind='verify_and_ingest_object_from_inbox' AND attempts=0 THEN 5 \
-                WHEN kind='fetch_post_replies' AND attempts=0 THEN 5 \
-                WHEN kind='fetch_platform_post_thread' AND attempts=0 THEN 5 \
-                WHEN kind='deliver_to_inbox' THEN 6 \
-                WHEN kind='probe_community_host_interaction' AND attempts=0 THEN 7 \
-                WHEN kind='discover_server_communities' AND attempts=0 THEN 8 \
+                        AND community_discovery_server.software IN (\
+                            'fedigroups-directory', \
+                            'mbin-compatible'\
+                        )\
+                    ) THEN 9 \
+                WHEN kind='discover_server_communities' AND attempts=0 \
+                    AND EXISTS (\
+                        SELECT 1 FROM community_discovery_server \
+                        WHERE community_discovery_server.host=task.params->>'host' \
+                        AND community_discovery_server.software IN (\
+                            'wordpress', \
+                            'bonfire', \
+                            'gancio', \
+                            'mobilizon'\
+                        )\
+                    ) THEN 10 \
+                WHEN kind='discover_server_communities' AND attempts=0 THEN 11 \
                 WHEN attempts>0 \
                     AND attempted_at < current_timestamp - INTERVAL '1 HOUR' \
                     AND kind IN (\
@@ -98,9 +120,9 @@ UPDATE task SET state='running', attempted_at=current_timestamp, latest_error=NU
                         'fetch_post_replies', \
                         'fetch_remote_post_refresh', \
                         'fetch_platform_post_thread'\
-                    ) THEN 9 \
-                WHEN attempts=0 THEN 10 \
-                ELSE 11 \
+                    ) THEN 12 \
+                WHEN attempts=0 THEN 13 \
+                ELSE 14 \
             END, \
             id \
         FOR UPDATE SKIP LOCKED LIMIT 1\
@@ -135,10 +157,89 @@ UPDATE task SET state='running', attempted_at=current_timestamp, latest_error=NU
                     AND EXISTS (\
                         SELECT 1 FROM community_discovery_server \
                         WHERE community_discovery_server.host=task.params->>'host' \
-                        AND community_discovery_server.software IN ('discourse', 'hubzilla', 'friendica')\
+                        AND community_discovery_server.software IN (\
+                            'fedigroups-directory', \
+                            'mbin-compatible'\
+                        )\
                     ) THEN 2 \
-                WHEN kind='discover_server_communities' AND attempts=0 THEN 3 \
-                ELSE 4 \
+                WHEN kind='discover_server_communities' AND attempts=0 \
+                    AND EXISTS (\
+                        SELECT 1 FROM community_discovery_server \
+                        WHERE community_discovery_server.host=task.params->>'host' \
+                        AND community_discovery_server.software IN (\
+                            'wordpress', \
+                            'bonfire', \
+                            'gancio', \
+                            'mobilizon'\
+                        )\
+                    ) THEN 3 \
+                WHEN kind='discover_server_communities' AND attempts=0 THEN 4 \
+                ELSE 5 \
+            END, \
+            id \
+        FOR UPDATE SKIP LOCKED LIMIT 1\
+    ) RETURNING id, kind, params";
+/*
+    Readback has its own narrow runner.
+
+    Inbound inbox verification can arrive in large bursts. Reply fetches,
+    platform thread refreshes, and post readback are what make local actions
+    feel reliable to users, so they get a small dedicated lane instead of
+    waiting behind every raw inbox request.
+*/
+const TAKE_NEXT_READBACK_TASK_SQL: &str = "\
+UPDATE task SET state='running', attempted_at=current_timestamp, latest_error=NULL WHERE id=(\
+    SELECT id FROM task \
+        WHERE state='pending' \
+        AND kind IN (\
+            'fetch_community_featured', \
+            'fetch_community_outbox', \
+            'fetch_collection_target_preview', \
+            'fetch_post_replies', \
+            'fetch_remote_post_refresh', \
+            'fetch_platform_post_thread'\
+        ) \
+        AND (attempted_at IS NULL OR attempted_at + (EXP(attempts) * INTERVAL '20 SECONDS') < current_timestamp) \
+        ORDER BY \
+            CASE \
+                WHEN kind='fetch_remote_post_refresh' AND attempts=0 THEN 0 \
+                WHEN kind='fetch_post_replies' AND attempts=0 THEN 1 \
+                WHEN kind='fetch_platform_post_thread' AND attempts=0 THEN 2 \
+                WHEN kind='fetch_community_outbox' AND params->>'preview'='true' THEN 3 \
+                WHEN kind='fetch_collection_target_preview' THEN 3 \
+                WHEN kind='fetch_community_outbox' AND attempts=0 THEN 4 \
+                WHEN kind='fetch_community_featured' AND attempts=0 THEN 5 \
+                WHEN attempts>0 \
+                    AND attempted_at < current_timestamp - INTERVAL '1 HOUR' THEN 6 \
+                ELSE 7 \
+            END, \
+            id \
+        FOR UPDATE SKIP LOCKED LIMIT 1\
+    ) RETURNING id, kind, params";
+/*
+    Inbox verification has its own lane too.
+
+    Large Lemmy-family instances can send many Announce activities quickly.
+    Keeping inbox work separate prevents the generic runner from becoming a
+    catch-all bottleneck while still leaving outbound delivery first in the
+    main queue.
+*/
+const TAKE_NEXT_INBOX_TASK_SQL: &str = "\
+UPDATE task SET state='running', attempted_at=current_timestamp, latest_error=NULL WHERE id=(\
+    SELECT id FROM task \
+        WHERE state='pending' \
+        AND kind IN (\
+            'ingest_object_from_inbox', \
+            'verify_and_ingest_object_from_inbox'\
+        ) \
+        AND (attempted_at IS NULL OR attempted_at + (EXP(attempts) * INTERVAL '20 SECONDS') < current_timestamp) \
+        ORDER BY \
+            CASE \
+                WHEN kind='verify_and_ingest_object_from_inbox' AND attempts=0 THEN 0 \
+                WHEN kind='ingest_object_from_inbox' AND attempts=0 THEN 1 \
+                WHEN attempts>0 \
+                    AND attempted_at < current_timestamp - INTERVAL '1 HOUR' THEN 2 \
+                ELSE 3 \
             END, \
             id \
         FOR UPDATE SKIP LOCKED LIMIT 1\
@@ -154,7 +255,7 @@ const CLEANUP_COMPLETED_TASKS_SQL: &str = "\
 WITH old_task AS (\
     SELECT id FROM task \
     WHERE state='completed' \
-    AND completed_at < current_timestamp - INTERVAL '3 DAYS' \
+    AND completed_at < current_timestamp - make_interval(days => $2::INTEGER) \
     ORDER BY completed_at \
     LIMIT $1 \
     FOR UPDATE SKIP LOCKED\
@@ -169,11 +270,30 @@ WITH old_task AS (\
     LIMIT $1 \
     FOR UPDATE SKIP LOCKED\
 ) DELETE FROM task USING old_task WHERE task.id=old_task.id";
+const COMPACT_FAILED_INBOX_TASK_PAYLOADS_SQL: &str = "\
+WITH compacted_task AS (\
+    SELECT id \
+    FROM task \
+    WHERE state='failed' \
+    AND kind IN ('ingest_object_from_inbox', 'verify_and_ingest_object_from_inbox') \
+    AND attempted_at < current_timestamp - make_interval(hours => $2::INTEGER) \
+    AND params->>'discarded' IS NULL \
+    ORDER BY attempted_at \
+    LIMIT $1 \
+    FOR UPDATE SKIP LOCKED\
+) UPDATE task \
+SET params=json_build_object(\
+    'discarded', TRUE, \
+    'reason', 'inbox task params removed after permanent failure', \
+    'original_bytes', octet_length(params::TEXT)\
+) \
+FROM compacted_task \
+WHERE task.id=compacted_task.id";
 const CLEANUP_FAILED_TASKS_SQL: &str = "\
 WITH old_task AS (\
     SELECT id FROM task \
     WHERE state='failed' \
-    AND attempted_at < current_timestamp - INTERVAL '14 DAYS' \
+    AND attempted_at < current_timestamp - make_interval(days => $2::INTEGER) \
     ORDER BY attempted_at \
     LIMIT $1 \
     FOR UPDATE SKIP LOCKED\
@@ -299,6 +419,12 @@ WITH stale_community AS (\
         WHERE community_follow.community=community.id \
         AND community_follow.local \
         AND community_follow.accepted\
+    ) \
+    AND NOT EXISTS (\
+        SELECT 1 FROM community_discovery \
+        WHERE community_discovery.community=community.id \
+        AND community_discovery.active \
+        AND community_discovery.remote_post_count >= 2\
     ) \
     AND NOT EXISTS (SELECT 1 FROM post WHERE post.community=community.id) \
     ORDER BY community.id \
@@ -485,8 +611,25 @@ AND NOT EXISTS (\
 )";
 const ENQUEUE_DUE_COMMUNITY_DISCOVERY_SQL: &str = "\
 INSERT INTO task (kind, params, max_attempts, created_at) \
-SELECT $1, json_build_object('host', host), $2, current_timestamp \
+SELECT $1, \
+    json_build_object(\
+        'host', community_discovery_server.host, \
+        'software', community_discovery_server.software\
+    ), \
+    $2, current_timestamp \
 FROM community_discovery_server \
+LEFT JOIN LATERAL (\
+    SELECT COUNT(*) FILTER (\
+            WHERE community_discovery.active \
+            AND community_discovery.remote_post_count >= 2\
+        ) AS useful_community_count, \
+        max(community_discovery.last_seen) FILTER (\
+            WHERE community_discovery.active \
+            AND community_discovery.remote_post_count >= 2\
+        ) AS newest_useful_community_seen \
+    FROM community_discovery \
+    WHERE community_discovery.host=community_discovery_server.host\
+) AS discovery_state ON TRUE \
 WHERE suppressed_reason IS NULL \
 AND NOT EXISTS (\
     SELECT 1 FROM community_server_visibility_suppression \
@@ -496,12 +639,12 @@ AND NOT EXISTS (\
 ) \
 AND (\
     (active AND failed_checks=0 \
-        AND (last_checked IS NULL OR last_checked < current_timestamp - INTERVAL '6 HOURS')) \
+        AND (last_checked IS NULL OR last_checked < current_timestamp - make_interval(hours => $4::INTEGER))) \
     OR (active AND failed_checks=1 \
-        AND (last_checked IS NULL OR last_checked < current_timestamp - INTERVAL '12 HOURS')) \
+        AND (last_checked IS NULL OR last_checked < current_timestamp - make_interval(hours => ($4::INTEGER * 2)))) \
     OR (active AND failed_checks>=2 \
-        AND (last_checked IS NULL OR last_checked < current_timestamp - INTERVAL '24 HOURS')) \
-    OR (NOT active AND (last_checked IS NULL OR last_checked < current_timestamp - INTERVAL '24 HOURS'))\
+        AND (last_checked IS NULL OR last_checked < current_timestamp - make_interval(hours => ($4::INTEGER * 4)))) \
+    OR (NOT active AND (last_checked IS NULL OR last_checked < current_timestamp - make_interval(hours => ($4::INTEGER * 4))))\
 ) \
 AND NOT EXISTS (\
     SELECT 1 FROM task \
@@ -511,9 +654,26 @@ AND NOT EXISTS (\
 ) \
 ORDER BY \
     CASE \
-        WHEN software IN ('discourse', 'hubzilla', 'friendica') THEN 0 \
+        WHEN community_discovery_server.software IN (\
+            'fedigroups-directory', \
+            'mbin-compatible'\
+        ) THEN 0 \
+        WHEN community_discovery_server.software IN (\
+            'wordpress', \
+            'bonfire', \
+            'gancio', \
+            'mobilizon'\
+        ) THEN 1 \
+        WHEN community_discovery_server.software IN ('discourse', 'hubzilla', 'friendica') THEN 2 \
+        ELSE 3 \
+    END, \
+    CASE \
+        WHEN discovery_state.useful_community_count > 0 \
+            AND COALESCE(discovery_state.newest_useful_community_seen, 'epoch'::TIMESTAMPTZ) \
+                < current_timestamp - INTERVAL '2 DAYS' THEN 0 \
         ELSE 1 \
     END, \
+    COALESCE(discovery_state.newest_useful_community_seen, 'epoch'::TIMESTAMPTZ), \
     CASE \
         WHEN active AND failed_checks=0 THEN 0 \
         WHEN active THEN 1 \
@@ -600,6 +760,89 @@ AND community.ap_id IS NOT NULL \
 AND COALESCE(community.ap_inbox, community.ap_shared_inbox) IS NOT NULL \
 ORDER BY community_follow.community, community_follow.follower \
 LIMIT $1";
+const JANITOR_PENDING_COMMUNITY_FOLLOW_UNDOS_SQL: &str = "\
+SELECT local_community_follow_undo.id, local_community_follow_undo.community, \
+    local_community_follow_undo.follower \
+FROM local_community_follow_undo \
+INNER JOIN community ON community.id=local_community_follow_undo.community \
+WHERE local_community_follow_undo.federation_sent_at IS NULL \
+AND NOT community.local \
+AND community.ap_id IS NOT NULL \
+AND COALESCE(community.ap_inbox, community.ap_shared_inbox) IS NOT NULL \
+AND NOT EXISTS (\
+    SELECT 1 FROM task \
+    WHERE task.kind='deliver_to_inbox' \
+    AND task.state IN ('pending', 'running') \
+    AND task.params::TEXT LIKE '%' || local_community_follow_undo.id::TEXT || '%'\
+) \
+ORDER BY local_community_follow_undo.created_at, local_community_follow_undo.id \
+LIMIT $1";
+const JANITOR_COMPLETE_LOCAL_COMMUNITY_FOLLOW_UNDOS_SQL: &str = "\
+WITH local_undo AS (\
+    SELECT local_community_follow_undo.id \
+    FROM local_community_follow_undo \
+    INNER JOIN community ON community.id=local_community_follow_undo.community \
+    WHERE local_community_follow_undo.federation_received_at IS NULL \
+    AND community.local \
+    ORDER BY local_community_follow_undo.created_at, local_community_follow_undo.id \
+    LIMIT $1 \
+    FOR UPDATE OF local_community_follow_undo SKIP LOCKED\
+) UPDATE local_community_follow_undo \
+SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp), \
+    federation_received_at=COALESCE(federation_received_at, current_timestamp) \
+FROM local_undo \
+WHERE local_community_follow_undo.id=local_undo.id";
+const JANITOR_COMPLETE_LOCAL_USER_FOLLOW_UNDOS_SQL: &str = "\
+WITH local_undo AS (\
+    SELECT local_user_follow_undo.id \
+    FROM local_user_follow_undo \
+    INNER JOIN person ON person.id=local_user_follow_undo.target \
+    WHERE local_user_follow_undo.federation_received_at IS NULL \
+    AND person.local \
+    ORDER BY local_user_follow_undo.created_at, local_user_follow_undo.id \
+    LIMIT $1 \
+    FOR UPDATE OF local_user_follow_undo SKIP LOCKED\
+) UPDATE local_user_follow_undo \
+SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp), \
+    federation_received_at=COALESCE(federation_received_at, current_timestamp) \
+FROM local_undo \
+WHERE local_user_follow_undo.id=local_undo.id";
+const JANITOR_PENDING_COLLECTION_TARGET_FOLLOW_UNDOS_SQL: &str = "\
+SELECT local_collection_target_follow_undo.id, \
+    local_collection_target_follow_undo.collection_target, \
+    local_collection_target_follow_undo.follower \
+FROM local_collection_target_follow_undo \
+INNER JOIN collection_target \
+    ON collection_target.id=local_collection_target_follow_undo.collection_target \
+WHERE local_collection_target_follow_undo.federation_sent_at IS NULL \
+AND collection_target.ap_id IS NOT NULL \
+AND collection_target.owner_ap_id IS NOT NULL \
+AND COALESCE(collection_target.owner_shared_inbox, collection_target.owner_inbox) IS NOT NULL \
+AND NOT EXISTS (\
+    SELECT 1 FROM task \
+    WHERE task.kind='deliver_to_inbox' \
+    AND task.state IN ('pending', 'running') \
+    AND task.params::TEXT LIKE '%' || local_collection_target_follow_undo.id::TEXT || '%'\
+) \
+ORDER BY local_collection_target_follow_undo.created_at, local_collection_target_follow_undo.id \
+LIMIT $1";
+const JANITOR_PENDING_USER_FOLLOW_UNDOS_SQL: &str = "\
+SELECT local_user_follow_undo.id, local_user_follow_undo.target, \
+    local_user_follow_undo.follower \
+FROM local_user_follow_undo \
+INNER JOIN person ON person.id=local_user_follow_undo.target \
+WHERE local_user_follow_undo.federation_sent_at IS NULL \
+AND NOT person.local \
+AND person.ap_id IS NOT NULL \
+AND person.ap_inbox IS NOT NULL \
+AND NOT EXISTS (\
+    SELECT 1 FROM task \
+    WHERE task.kind='deliver_to_inbox' \
+    AND task.state IN ('pending', 'running') \
+    AND task.params::TEXT LIKE '%' || local_user_follow_undo.id::TEXT || '%'\
+) \
+ORDER BY local_user_follow_undo.created_at, local_user_follow_undo.id \
+LIMIT $1";
 const JANITOR_RECALCULATE_POST_LIKES_SQL: &str = "\
 WITH candidate AS (\
     SELECT post.id, COUNT(post_like.person)::INTEGER AS like_count \
@@ -626,9 +869,7 @@ WITH stale_discovery AS (\
     AND (\
         community.deleted \
         OR COALESCE(community_discovery.remote_post_count, 0) < 2 \
-        OR community_discovery_server.suppressed_reason IS NOT NULL \
-        OR NOT community_discovery_server.active \
-        OR community_discovery_server.failed_checks >= 3\
+        OR community_discovery_server.suppressed_reason IS NOT NULL\
     ) \
     ORDER BY community_discovery.community \
     LIMIT $1 \
@@ -637,6 +878,26 @@ WITH stale_discovery AS (\
 SET active=FALSE \
 FROM stale_discovery \
 WHERE community_discovery.community=stale_discovery.community";
+const JANITOR_REACTIVATE_CURRENT_COMMUNITY_DISCOVERY_SQL: &str = "\
+WITH current_discovery AS (\
+    SELECT community_discovery.community \
+    FROM community_discovery \
+    INNER JOIN community ON community.id=community_discovery.community \
+    INNER JOIN community_discovery_server \
+        ON community_discovery_server.host=community_discovery.host \
+    WHERE NOT community_discovery.active \
+    AND NOT community.deleted \
+    AND community_discovery.remote_post_count >= 2 \
+    AND community_discovery_server.active \
+    AND community_discovery_server.failed_checks < 3 \
+    AND community_discovery_server.suppressed_reason IS NULL \
+    ORDER BY community_discovery.community \
+    LIMIT $1 \
+    FOR UPDATE OF community_discovery SKIP LOCKED\
+) UPDATE community_discovery \
+SET active=TRUE \
+FROM current_discovery \
+WHERE community_discovery.community=current_discovery.community";
 const JANITOR_COMPACT_COMPLETED_INBOX_TASK_PAYLOADS_SQL: &str = "\
 WITH compacted_task AS (\
     SELECT id \
@@ -673,11 +934,16 @@ WITH terminal_task AS (\
         OR lower(latest_error) LIKE '%not found%' \
         OR lower(latest_error) LIKE '%no such like%' \
         OR lower(latest_error) LIKE '%tombstone%' \
+        OR lower(latest_error) LIKE '%status: 404%' \
+        OR lower(latest_error) LIKE '%status: 410%' \
         OR lower(latest_error) LIKE '%unknown content type found for activity%' \
         OR lower(latest_error) LIKE '%invalid or unsupported data%' \
         OR lower(latest_error) LIKE '%signature check failed%' \
         OR lower(latest_error) LIKE '%request not signed%' \
         OR lower(latest_error) LIKE '%http body exceeded%' \
+        OR lower(latest_error) LIKE '%entity too large%' \
+        OR lower(latest_error) LIKE '%not a person%' \
+        OR lower(latest_error) LIKE '%not a group%' \
         OR lower(latest_error) LIKE '%data did not match any variant of untagged enum knownobject%' \
         OR lower(latest_error) LIKE '%status: 400%' \
         OR lower(latest_error) LIKE '%status: 403%'\
@@ -691,6 +957,63 @@ SET state='failed'::lt_task_state, \
     attempted_at=current_timestamp \
 FROM terminal_task \
 WHERE task.id=terminal_task.id";
+const JANITOR_COMPLETE_IRRELEVANT_INBOX_TASKS_SQL: &str = "\
+WITH inbox_task AS (\
+    SELECT task.id, (task.params->>'body')::JSONB AS body_json \
+    FROM task \
+    WHERE task.state='pending' \
+    AND task.kind='verify_and_ingest_object_from_inbox'\
+), untracked_announce AS (\
+    SELECT inbox_task.id \
+    FROM inbox_task \
+    WHERE inbox_task.body_json->>'type'='Announce' \
+    AND jsonb_typeof(inbox_task.body_json->'actor')='string' \
+    AND NOT EXISTS (\
+        SELECT 1 \
+        FROM community \
+        INNER JOIN community_follow \
+            ON community_follow.community=community.id \
+            AND community_follow.local \
+            AND community_follow.accepted \
+        WHERE NOT community.deleted \
+        AND community.ap_id=inbox_task.body_json->>'actor'\
+    )\
+), delete_task AS (\
+    SELECT inbox_task.id, \
+        inbox_task.body_json->>'actor' AS actor, \
+        CASE \
+            WHEN jsonb_typeof(inbox_task.body_json->'object')='string' \
+            THEN inbox_task.body_json->>'object' \
+            WHEN jsonb_typeof(inbox_task.body_json->'object')='object' \
+            THEN inbox_task.body_json->'object'->>'id' \
+            ELSE NULL \
+        END AS object_id \
+    FROM inbox_task \
+    WHERE inbox_task.body_json->>'type'='Delete' \
+    AND jsonb_typeof(inbox_task.body_json->'actor')='string'\
+), irrelevant_delete AS (\
+    SELECT delete_task.id \
+    FROM delete_task \
+    WHERE delete_task.object_id IS NOT NULL \
+    AND NOT EXISTS (SELECT 1 FROM person WHERE ap_id=delete_task.actor OR ap_id=delete_task.object_id) \
+    AND NOT EXISTS (SELECT 1 FROM community WHERE ap_id=delete_task.actor OR ap_id=delete_task.object_id) \
+    AND NOT EXISTS (SELECT 1 FROM post WHERE ap_id=delete_task.object_id) \
+    AND NOT EXISTS (SELECT 1 FROM reply WHERE ap_id=delete_task.object_id) \
+    AND NOT EXISTS (SELECT 1 FROM post_like WHERE ap_id=delete_task.object_id) \
+    AND NOT EXISTS (SELECT 1 FROM reply_like WHERE ap_id=delete_task.object_id)\
+), target_task AS (\
+    SELECT id FROM untracked_announce \
+    UNION ALL \
+    SELECT id FROM irrelevant_delete \
+    ORDER BY id \
+    LIMIT $1\
+) UPDATE task \
+SET state='completed'::lt_task_state, \
+    attempts=attempts + 1, \
+    completed_at=current_timestamp, \
+    latest_error=NULL \
+FROM target_task \
+WHERE task.id=target_task.id";
 const JANITOR_REPAIR_BLANK_POST_TITLES_SQL: &str = "\
 WITH candidate AS (\
     SELECT post.id, \
@@ -737,6 +1060,9 @@ struct CleanupSettings {
     cleanup_notification_retention_days: i32,
     cleanup_failed_inbox_task_payloads_enabled: bool,
     cleanup_failed_inbox_task_payload_retention_days: i32,
+    cleanup_completed_task_retention_days: i32,
+    cleanup_failed_task_retention_days: i32,
+    cleanup_failed_inbox_task_payload_compaction_hours: i32,
 }
 
 impl CleanupSettings {
@@ -754,10 +1080,16 @@ impl CleanupSettings {
 struct JanitorReport {
     repaired_community_endpoints: u64,
     requeued_community_follows: u64,
+    requeued_community_follow_undos: u64,
+    requeued_collection_target_follow_undos: u64,
+    requeued_user_follow_undos: u64,
+    completed_local_follow_undos: u64,
     recalculated_post_likes: u64,
     deactivated_discoveries: u64,
+    reactivated_discoveries: u64,
     compacted_completed_inbox_tasks: u64,
     failed_terminal_inbox_tasks: u64,
+    completed_irrelevant_inbox_tasks: u64,
     repaired_post_titles: u64,
 }
 
@@ -765,10 +1097,16 @@ impl JanitorReport {
     fn total_changes(&self) -> u64 {
         self.repaired_community_endpoints
             + self.requeued_community_follows
+            + self.requeued_community_follow_undos
+            + self.requeued_collection_target_follow_undos
+            + self.requeued_user_follow_undos
+            + self.completed_local_follow_undos
             + self.recalculated_post_likes
             + self.deactivated_discoveries
+            + self.reactivated_discoveries
             + self.compacted_completed_inbox_tasks
             + self.failed_terminal_inbox_tasks
+            + self.completed_irrelevant_inbox_tasks
             + self.repaired_post_titles
     }
 }
@@ -833,11 +1171,16 @@ fn task_error_is_terminal(kind: &str, err: &str) -> bool {
         "\"error\":\"not found\"",
         "no such like",
         "tombstone",
+        "status: 404",
+        "status: 410",
         "unknown content type found for activity",
         "invalid or unsupported data",
         "signature check failed",
         "request not signed",
         "http body exceeded",
+        "entity too large",
+        "not a person",
+        "not a group",
         "data did not match any variant of untagged enum knownobject",
         "status: 400",
         "status: 403",
@@ -853,6 +1196,8 @@ pub async fn run_worker(
     futures::try_join!(
         run_task_runner(ctx.clone(), recv),
         run_discovery_task_runner(ctx.clone()),
+        run_readback_task_runner(ctx.clone()),
+        run_inbox_task_runner(ctx.clone()),
         run_schedule(ctx),
     )?;
 
@@ -935,6 +1280,26 @@ async fn run_discovery_task_runner(ctx: Arc<crate::BaseContext>) -> Result<(), c
     }
 }
 
+async fn run_readback_task_runner(ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> {
+    let db = ctx.db_pool.get().await?;
+
+    loop {
+        if !perform_next_queued_task(ctx.clone(), &db, TAKE_NEXT_READBACK_TASK_SQL).await? {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    }
+}
+
+async fn run_inbox_task_runner(ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> {
+    let db = ctx.db_pool.get().await?;
+
+    loop {
+        if !perform_next_queued_task(ctx.clone(), &db, TAKE_NEXT_INBOX_TASK_SQL).await? {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    }
+}
+
 async fn run_schedule(ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> {
     let scheduler = tokio_cron_scheduler::JobScheduler::new().await?;
 
@@ -974,6 +1339,24 @@ async fn run_schedule(ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> 
     if initial_janitor_report.total_changes() > 0 {
         log::debug!("Janitor repaired database drift: {initial_janitor_report:?}");
     }
+
+    /*
+        The hourly cleanup keeps preview imports and task rows short-lived, but
+        a restarted instance may miss one or more cleanup windows. Run the same
+        bounded cleanup once at scheduler start so normal restarts do not leave
+        stale remote previews around until the next cron tick.
+    */
+    let db = ctx.db_pool.get().await?;
+    let settings = load_cleanup_settings(&db).await?;
+    let initial_remote_cleanup = cleanup_old_remote_posts(&db, &settings).await?;
+    if initial_remote_cleanup > 0 {
+        log::debug!("Cleaned up {initial_remote_cleanup} old or unfollowed remote posts");
+    }
+    let initial_task_cleanup = cleanup_old_tasks(&db, &settings).await?;
+    if initial_task_cleanup > 0 {
+        log::debug!("Cleaned up or compacted {initial_task_cleanup} old task rows");
+    }
+    std::mem::drop(db);
 
     scheduler
         .add(tokio_cron_scheduler::Job::new_async("17 7 * * * *", {
@@ -1129,6 +1512,12 @@ async fn run_schedule(ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> 
                                 log::debug!("Cleaned up {res} old or unfollowed remote posts");
                             }
 
+                            let res = cleanup_old_tasks(&db, &settings).await?;
+
+                            if res > 0 {
+                                log::debug!("Cleaned up or compacted {res} old task rows");
+                            }
+
                             Result::<_, crate::Error>::Ok(())
                         }
                         .map(|res| {
@@ -1158,7 +1547,7 @@ async fn run_schedule(ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> 
                         let res = cleanup_old_tasks(&db, &settings).await?;
 
                         if res > 0 {
-                            log::debug!("Cleaned up {res} old tasks");
+                            log::debug!("Cleaned up or compacted {res} old task rows");
                         }
 
                         let res = cleanup_old_remote_posts(&db, &settings).await?;
@@ -1281,10 +1670,24 @@ async fn enqueue_due_community_discovery(
     db.execute(UPSERT_KNOWN_COMMUNITY_DISCOVERY_SERVERS_SQL, &[])
         .await?;
 
+    let (enqueue_limit, refresh_interval_hours) =
+        db.query_opt(DISCOVERY_SETTINGS_SQL, &[]).await?.map_or(
+            (
+                DEFAULT_COMMUNITY_DISCOVERY_ENQUEUE_LIMIT,
+                DEFAULT_COMMUNITY_DISCOVERY_REFRESH_INTERVAL_HOURS,
+            ),
+            |row| (i64::from(row.get::<_, i32>(0)), row.get::<_, i32>(1)),
+        );
+
     let inserted = db
         .execute(
             ENQUEUE_DUE_COMMUNITY_DISCOVERY_SQL,
-            &[&kind, &max_attempts, &COMMUNITY_DISCOVERY_ENQUEUE_LIMIT],
+            &[
+                &kind,
+                &max_attempts,
+                &enqueue_limit,
+                &refresh_interval_hours,
+            ],
         )
         .await?;
 
@@ -1366,11 +1769,23 @@ async fn cleanup_old_tasks(
     db: &tokio_postgres::Client,
     settings: &CleanupSettings,
 ) -> Result<u64, crate::Error> {
-    let mut removed = 0;
+    /*
+        Task rows are useful while they explain recent work, but successful
+        inbox verification tasks can carry the full received object. A busy
+        federated instance can therefore grow the task table quickly unless
+        routine cleanup also compacts those payloads.
+    */
+    let mut changed = 0;
 
     for _ in 0..TASK_CLEANUP_MAX_BATCHES {
         let completed = db
-            .execute(CLEANUP_COMPLETED_TASKS_SQL, &[&TASK_CLEANUP_BATCH_SIZE])
+            .execute(
+                CLEANUP_COMPLETED_TASKS_SQL,
+                &[
+                    &TASK_CLEANUP_BATCH_SIZE,
+                    &settings.cleanup_completed_task_retention_days,
+                ],
+            )
             .await?;
 
         let failed_inbox = db
@@ -1384,19 +1799,57 @@ async fn cleanup_old_tasks(
             .await?;
 
         let failed = db
-            .execute(CLEANUP_FAILED_TASKS_SQL, &[&TASK_CLEANUP_BATCH_SIZE])
+            .execute(
+                CLEANUP_FAILED_TASKS_SQL,
+                &[
+                    &TASK_CLEANUP_BATCH_SIZE,
+                    &settings.cleanup_failed_task_retention_days,
+                ],
+            )
             .await?;
 
-        let batch_removed = completed + failed_inbox + failed;
+        let compacted_failed_inbox = if settings.cleanup_failed_inbox_task_payloads_enabled {
+            db.execute(
+                COMPACT_FAILED_INBOX_TASK_PAYLOADS_SQL,
+                &[
+                    &TASK_CLEANUP_BATCH_SIZE,
+                    &settings.cleanup_failed_inbox_task_payload_compaction_hours,
+                ],
+            )
+            .await?
+        } else {
+            0
+        };
 
-        if batch_removed == 0 {
+        let compacted_completed_inbox = db
+            .execute(
+                JANITOR_COMPACT_COMPLETED_INBOX_TASK_PAYLOADS_SQL,
+                &[&TASK_CLEANUP_BATCH_SIZE],
+            )
+            .await?;
+
+        let completed_irrelevant_inbox = db
+            .execute(
+                JANITOR_COMPLETE_IRRELEVANT_INBOX_TASKS_SQL,
+                &[&TASK_CLEANUP_BATCH_SIZE],
+            )
+            .await?;
+
+        let batch_changed = completed
+            + failed_inbox
+            + failed
+            + compacted_failed_inbox
+            + compacted_completed_inbox
+            + completed_irrelevant_inbox;
+
+        if batch_changed == 0 {
             break;
         }
 
-        removed += batch_removed;
+        changed += batch_changed;
     }
 
-    Ok(removed)
+    Ok(changed)
 }
 
 async fn load_cleanup_settings(
@@ -1416,6 +1869,9 @@ async fn load_cleanup_settings(
         cleanup_notification_retention_days: row.get(8),
         cleanup_failed_inbox_task_payloads_enabled: row.get(9),
         cleanup_failed_inbox_task_payload_retention_days: row.get(10),
+        cleanup_completed_task_retention_days: row.get(11),
+        cleanup_failed_task_retention_days: row.get(12),
+        cleanup_failed_inbox_task_payload_compaction_hours: row.get(13),
     })
 }
 
@@ -1428,15 +1884,40 @@ async fn run_janitor(ctx: Arc<crate::BaseContext>) -> Result<JanitorReport, crat
         run_janitor_batches(&db, JANITOR_RECALCULATE_POST_LIKES_SQL).await?;
     let deactivated_discoveries =
         run_janitor_batches(&db, JANITOR_DEACTIVATE_STALE_COMMUNITY_DISCOVERY_SQL).await?;
+    let reactivated_discoveries =
+        run_janitor_batches(&db, JANITOR_REACTIVATE_CURRENT_COMMUNITY_DISCOVERY_SQL).await?;
     let compacted_completed_inbox_tasks =
         run_janitor_batches(&db, JANITOR_COMPACT_COMPLETED_INBOX_TASK_PAYLOADS_SQL).await?;
     let failed_terminal_inbox_tasks =
         run_janitor_batches(&db, JANITOR_FAIL_TERMINAL_INBOX_TASKS_SQL).await?;
+    let completed_irrelevant_inbox_tasks =
+        run_janitor_batches(&db, JANITOR_COMPLETE_IRRELEVANT_INBOX_TASKS_SQL).await?;
     let repaired_post_titles =
         run_janitor_batches(&db, JANITOR_REPAIR_BLANK_POST_TITLES_SQL).await?;
+    let completed_local_follow_undos =
+        run_janitor_batches(&db, JANITOR_COMPLETE_LOCAL_COMMUNITY_FOLLOW_UNDOS_SQL).await?
+            + run_janitor_batches(&db, JANITOR_COMPLETE_LOCAL_USER_FOLLOW_UNDOS_SQL).await?;
     let pending_follows = db
         .query(
             JANITOR_PENDING_COMMUNITY_FOLLOWS_SQL,
+            &[&JANITOR_FOLLOW_REPAIR_LIMIT],
+        )
+        .await?;
+    let pending_community_follow_undos = db
+        .query(
+            JANITOR_PENDING_COMMUNITY_FOLLOW_UNDOS_SQL,
+            &[&JANITOR_FOLLOW_REPAIR_LIMIT],
+        )
+        .await?;
+    let pending_collection_target_follow_undos = db
+        .query(
+            JANITOR_PENDING_COLLECTION_TARGET_FOLLOW_UNDOS_SQL,
+            &[&JANITOR_FOLLOW_REPAIR_LIMIT],
+        )
+        .await?;
+    let pending_user_follow_undos = db
+        .query(
+            JANITOR_PENDING_USER_FOLLOW_UNDOS_SQL,
             &[&JANITOR_FOLLOW_REPAIR_LIMIT],
         )
         .await?;
@@ -1451,13 +1932,47 @@ async fn run_janitor(ctx: Arc<crate::BaseContext>) -> Result<JanitorReport, crat
         );
     }
 
+    for row in &pending_community_follow_undos {
+        crate::apub_util::spawn_enqueue_send_community_follow_undo(
+            row.get(0),
+            CommunityLocalID(row.get(1)),
+            UserLocalID(row.get(2)),
+            ctx.clone(),
+        );
+    }
+
+    for row in &pending_collection_target_follow_undos {
+        crate::apub_util::spawn_enqueue_send_collection_target_follow_undo(
+            row.get(0),
+            CollectionTargetLocalID(row.get(1)),
+            UserLocalID(row.get(2)),
+            ctx.clone(),
+        );
+    }
+
+    for row in &pending_user_follow_undos {
+        crate::apub_util::spawn_enqueue_send_user_follow_undo(
+            UserLocalID(row.get(1)),
+            UserLocalID(row.get(2)),
+            row.get(0),
+            ctx.clone(),
+        );
+    }
+
     Ok(JanitorReport {
         repaired_community_endpoints,
         requeued_community_follows: pending_follows.len() as u64,
+        requeued_community_follow_undos: pending_community_follow_undos.len() as u64,
+        requeued_collection_target_follow_undos: pending_collection_target_follow_undos.len()
+            as u64,
+        requeued_user_follow_undos: pending_user_follow_undos.len() as u64,
+        completed_local_follow_undos,
         recalculated_post_likes,
         deactivated_discoveries,
+        reactivated_discoveries,
         compacted_completed_inbox_tasks,
         failed_terminal_inbox_tasks,
+        completed_irrelevant_inbox_tasks,
         repaired_post_titles,
     })
 }
@@ -1959,17 +2474,15 @@ mod tests {
             .find("kind='fetch_platform_post_thread' AND attempts=0")
             .unwrap();
         let discovery_seed = sql.find("'seed_community_discovery_hosts'").unwrap();
-        let priority_discovery = sql
-            .find("community_discovery_server.software IN ('discourse', 'hubzilla', 'friendica')")
-            .unwrap();
+        let priority_discovery = sql.find("'fedigroups-directory'").unwrap();
         let discovery = sql
-            .find("WHEN kind='discover_server_communities' AND attempts=0 THEN 8")
+            .find("WHEN kind='discover_server_communities' AND attempts=0 THEN 11")
             .unwrap();
         let interaction_probe = sql
             .find("kind='probe_community_host_interaction' AND attempts=0")
             .unwrap();
         let aged_fetch_retry = sql.find("attempted_at < current_timestamp").unwrap();
-        let fresh_task = sql.find("WHEN attempts=0 THEN 10").unwrap();
+        let fresh_task = sql.find("WHEN attempts=0 THEN 13").unwrap();
 
         assert!(audience_delivery < fresh_inbox_delivery);
         assert!(fresh_inbox_delivery < discovery_seed);
@@ -1979,15 +2492,16 @@ mod tests {
         assert!(followed_outbox_fetch < post_replies_fetch);
         assert!(preview_fetch < remote_post_refresh);
         assert!(preview_fetch < platform_thread_fetch);
-        assert!(priority_discovery < remote_post_refresh);
-        assert!(priority_discovery < followed_outbox_fetch);
-        assert!(post_replies_fetch < inbox_retry);
-        assert!(remote_post_refresh < inbox_retry);
-        assert!(platform_thread_fetch < inbox_retry);
+        assert!(remote_post_refresh < followed_outbox_fetch);
+        assert!(followed_outbox_fetch < inbox_retry);
+        assert!(inbox_retry < fresh_inbox_verify);
+        assert!(inbox_retry < post_replies_fetch);
+        assert!(inbox_retry < platform_thread_fetch);
+        assert!(remote_post_refresh < priority_discovery);
+        assert!(followed_outbox_fetch < priority_discovery);
         assert!(post_replies_fetch < interaction_probe);
         assert!(remote_post_refresh < interaction_probe);
         assert!(platform_thread_fetch < interaction_probe);
-        assert!(inbox_retry < interaction_probe);
         assert!(interaction_probe < discovery);
         assert!(discovery < aged_fetch_retry);
         assert!(aged_fetch_retry < fresh_task);
@@ -2022,6 +2536,18 @@ mod tests {
         assert!(super::task_error_is_terminal(
             "verify_and_ingest_object_from_inbox",
             "Internal(Error(\"data did not match any variant of untagged enum KnownObject\"))"
+        ));
+        assert!(super::task_error_is_terminal(
+            "verify_and_ingest_object_from_inbox",
+            "InternalStrStatic(\"Not a Person\")"
+        ));
+        assert!(super::task_error_is_terminal(
+            "verify_and_ingest_object_from_inbox",
+            "UserError(Response { status: 410 })"
+        ));
+        assert!(super::task_error_is_terminal(
+            "verify_and_ingest_object_from_inbox",
+            "InternalStrStatic(\"HTTP body exceeded upload limit\")"
         ));
         assert!(super::task_error_is_terminal(
             "ingest_object_from_inbox",
@@ -2067,7 +2593,11 @@ mod tests {
         assert!(sql.contains("'verify_and_ingest_object_from_inbox'"));
         assert!(sql.contains("latest_error IS NOT NULL"));
         assert!(sql.contains("just a moment"));
+        assert!(sql.contains("status: 410"));
+        assert!(sql.contains("entity too large"));
         assert!(sql.contains("unknown content type found for activity"));
+        assert!(sql.contains("not a person"));
+        assert!(sql.contains("not a group"));
         assert!(sql.contains("status: 403"));
         assert!(sql.contains("SET state='failed'::lt_task_state"));
         assert!(sql.contains("attempts=max_attempts"));
@@ -2094,15 +2624,77 @@ mod tests {
             .find("kind='probe_community_host_interaction' AND attempts=0 THEN 1")
             .expect("host probe priority");
         let priority_discovery = sql
-            .find("community_discovery_server.software IN ('discourse', 'hubzilla', 'friendica')")
+            .find("'fedigroups-directory'")
             .expect("priority platform discovery");
         let general_discovery = sql
-            .find("kind='discover_server_communities' AND attempts=0 THEN 3")
+            .find("kind='discover_server_communities' AND attempts=0 THEN 4")
             .expect("general discovery");
 
         assert!(seeds < probe);
         assert!(probe < priority_discovery);
         assert!(priority_discovery < general_discovery);
+    }
+
+    #[test]
+    fn worker_has_a_dedicated_readback_lane() {
+        let sql = super::TAKE_NEXT_READBACK_TASK_SQL;
+
+        assert!(sql.contains("'fetch_remote_post_refresh'"));
+        assert!(sql.contains("'fetch_post_replies'"));
+        assert!(sql.contains("'fetch_platform_post_thread'"));
+        assert!(sql.contains("'fetch_community_outbox'"));
+        assert!(sql.contains("'fetch_collection_target_preview'"));
+        assert!(sql.contains("'fetch_community_featured'"));
+        assert!(!sql.contains("'verify_and_ingest_object_from_inbox'"));
+        assert!(!sql.contains("'discover_server_communities'"));
+        assert!(!sql.contains("'deliver_to_inbox'"));
+        assert!(sql.contains("FOR UPDATE SKIP LOCKED LIMIT 1"));
+
+        let post_readback = sql
+            .find("kind='fetch_remote_post_refresh' AND attempts=0 THEN 0")
+            .expect("local post readback priority");
+        let reply_fetch = sql
+            .find("kind='fetch_post_replies' AND attempts=0 THEN 1")
+            .expect("reply fetch priority");
+        let platform_thread = sql
+            .find("kind='fetch_platform_post_thread' AND attempts=0 THEN 2")
+            .expect("platform thread priority");
+        let outbox_preview = sql
+            .find("kind='fetch_community_outbox' AND params->>'preview'='true' THEN 3")
+            .expect("preview priority");
+        let followed_outbox = sql
+            .find("kind='fetch_community_outbox' AND attempts=0 THEN 4")
+            .expect("followed outbox priority");
+
+        assert!(post_readback < reply_fetch);
+        assert!(reply_fetch < platform_thread);
+        assert!(platform_thread < outbox_preview);
+        assert!(outbox_preview < followed_outbox);
+    }
+
+    #[test]
+    fn worker_has_a_dedicated_inbox_lane() {
+        let sql = super::TAKE_NEXT_INBOX_TASK_SQL;
+
+        assert!(sql.contains("'verify_and_ingest_object_from_inbox'"));
+        assert!(sql.contains("'ingest_object_from_inbox'"));
+        assert!(!sql.contains("'fetch_platform_post_thread'"));
+        assert!(!sql.contains("'discover_server_communities'"));
+        assert!(!sql.contains("'deliver_to_inbox'"));
+        assert!(sql.contains("FOR UPDATE SKIP LOCKED LIMIT 1"));
+
+        let verify = sql
+            .find("kind='verify_and_ingest_object_from_inbox' AND attempts=0 THEN 0")
+            .expect("verified inbox priority");
+        let ingest = sql
+            .find("kind='ingest_object_from_inbox' AND attempts=0 THEN 1")
+            .expect("plain inbox priority");
+        let retry = sql
+            .find("attempted_at < current_timestamp - INTERVAL '1 HOUR' THEN 2")
+            .expect("aged inbox retry priority");
+
+        assert!(verify < ingest);
+        assert!(ingest < retry);
     }
 
     #[test]
@@ -2116,8 +2708,8 @@ mod tests {
         assert!(sql.contains("'fetch_post_replies'"));
         assert!(sql.contains("'fetch_remote_post_refresh'"));
         assert!(sql.contains("'fetch_platform_post_thread'"));
-        assert!(sql.contains("WHEN attempts=0 THEN 10"));
-        assert!(sql.contains("ELSE 11"));
+        assert!(sql.contains("WHEN attempts=0 THEN 13"));
+        assert!(sql.contains("ELSE 14"));
     }
 
     #[test]
@@ -2154,9 +2746,17 @@ mod tests {
         let inbox_verify = sql
             .find("kind='verify_and_ingest_object_from_inbox' AND attempts=0")
             .unwrap();
-        let generic_task = sql.find("WHEN attempts=0 THEN 10").unwrap();
+        let post_replies_fetch = sql
+            .find("kind='fetch_post_replies' AND attempts=0")
+            .unwrap();
+        let platform_thread_fetch = sql
+            .find("kind='fetch_platform_post_thread' AND attempts=0")
+            .unwrap();
+        let generic_task = sql.find("WHEN attempts=0 THEN 13").unwrap();
 
         assert!(followed_outbox_fetch < inbox_verify);
+        assert!(followed_outbox_fetch < post_replies_fetch);
+        assert!(followed_outbox_fetch < platform_thread_fetch);
         assert!(followed_outbox_fetch < generic_task);
     }
 
@@ -2194,7 +2794,9 @@ mod tests {
         let sql = super::CLEANUP_COMPLETED_TASKS_SQL;
 
         assert!(sql.contains("state='completed'"));
-        assert!(sql.contains("completed_at < current_timestamp - INTERVAL '3 DAYS'"));
+        assert!(
+            sql.contains("completed_at < current_timestamp - make_interval(days => $2::INTEGER)")
+        );
         assert!(sql.contains("ORDER BY completed_at"));
         assert!(sql.contains("LIMIT $1"));
         assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
@@ -2221,8 +2823,27 @@ mod tests {
         let sql = super::CLEANUP_FAILED_TASKS_SQL;
 
         assert!(sql.contains("state='failed'"));
-        assert!(sql.contains("attempted_at < current_timestamp - INTERVAL '14 DAYS'"));
+        assert!(
+            sql.contains("attempted_at < current_timestamp - make_interval(days => $2::INTEGER)")
+        );
         assert!(sql.contains("ORDER BY attempted_at"));
+        assert!(sql.contains("LIMIT $1"));
+        assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
+    }
+
+    #[test]
+    fn task_cleanup_compacts_failed_inbox_payloads_after_debug_window() {
+        let sql = super::COMPACT_FAILED_INBOX_TASK_PAYLOADS_SQL;
+
+        assert!(sql.contains("state='failed'"));
+        assert!(sql.contains("ingest_object_from_inbox"));
+        assert!(sql.contains("verify_and_ingest_object_from_inbox"));
+        assert!(
+            sql.contains("attempted_at < current_timestamp - make_interval(hours => $2::INTEGER)")
+        );
+        assert!(sql.contains("params->>'discarded' IS NULL"));
+        assert!(sql.contains("json_build_object"));
+        assert!(sql.contains("original_bytes"));
         assert!(sql.contains("LIMIT $1"));
         assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
     }
@@ -2367,14 +2988,28 @@ mod tests {
         assert!(enqueue_sql.contains("active AND failed_checks=1"));
         assert!(enqueue_sql.contains("active AND failed_checks>=2"));
         assert!(enqueue_sql.contains("NOT active"));
-        assert!(enqueue_sql.contains("last_checked < current_timestamp - INTERVAL '6 HOURS'"));
-        assert!(enqueue_sql.contains("last_checked < current_timestamp - INTERVAL '12 HOURS'"));
-        assert!(enqueue_sql.contains("last_checked < current_timestamp - INTERVAL '24 HOURS'"));
-        assert!(enqueue_sql.contains("software IN ('discourse', 'hubzilla', 'friendica')"));
+        assert!(enqueue_sql.contains("make_interval(hours => $4::INTEGER)"));
+        assert!(enqueue_sql.contains("make_interval(hours => ($4::INTEGER * 2))"));
+        assert!(enqueue_sql.contains("make_interval(hours => ($4::INTEGER * 4))"));
+        assert!(enqueue_sql.contains("'fedigroups-directory'"));
+        assert!(enqueue_sql.contains("'mbin-compatible'"));
+        assert!(enqueue_sql.contains("'wordpress'"));
+        assert!(enqueue_sql.contains(
+            "community_discovery_server.software IN ('discourse', 'hubzilla', 'friendica')"
+        ));
+        assert!(enqueue_sql.contains("LEFT JOIN LATERAL"));
+        assert!(enqueue_sql.contains("useful_community_count"));
+        assert!(enqueue_sql.contains("newest_useful_community_seen"));
+        assert!(enqueue_sql.contains("remote_post_count >= 2"));
+        assert!(enqueue_sql.contains("INTERVAL '2 DAYS'"));
+        assert!(enqueue_sql.contains("'host', community_discovery_server.host"));
+        assert!(enqueue_sql.contains("'software', community_discovery_server.software"));
         assert!(enqueue_sql.contains("ORDER BY"));
         assert!(enqueue_sql.contains("LIMIT $3"));
         assert!(enqueue_sql.contains("task.state IN ('pending', 'running')"));
         assert!(enqueue_sql.contains("task.params->>'host'=community_discovery_server.host"));
+        assert!(super::DISCOVERY_SETTINGS_SQL.contains("discovery_enqueue_limit"));
+        assert!(super::DISCOVERY_SETTINGS_SQL.contains("discovery_refresh_interval_hours"));
     }
 
     #[test]
@@ -2456,6 +3091,59 @@ mod tests {
     }
 
     #[test]
+    fn janitor_requeues_only_actionable_follow_undos() {
+        let community_sql = super::JANITOR_PENDING_COMMUNITY_FOLLOW_UNDOS_SQL;
+        let collection_sql = super::JANITOR_PENDING_COLLECTION_TARGET_FOLLOW_UNDOS_SQL;
+        let user_sql = super::JANITOR_PENDING_USER_FOLLOW_UNDOS_SQL;
+
+        assert!(community_sql.contains("federation_sent_at IS NULL"));
+        assert!(community_sql.contains("NOT community.local"));
+        assert!(!community_sql.contains("NOT community.deleted"));
+        assert!(community_sql.contains("COALESCE(community.ap_inbox, community.ap_shared_inbox)"));
+        assert!(community_sql.contains("task.kind='deliver_to_inbox'"));
+        assert!(community_sql.contains("task.state IN ('pending', 'running')"));
+        assert!(community_sql.contains("task.params::TEXT LIKE '%'"));
+        assert!(community_sql.contains("LIMIT $1"));
+
+        assert!(collection_sql.contains("federation_sent_at IS NULL"));
+        assert!(collection_sql.contains("collection_target.owner_ap_id IS NOT NULL"));
+        assert!(collection_sql.contains(
+            "COALESCE(collection_target.owner_shared_inbox, collection_target.owner_inbox)"
+        ));
+        assert!(collection_sql.contains("task.kind='deliver_to_inbox'"));
+        assert!(collection_sql.contains("LIMIT $1"));
+
+        assert!(user_sql.contains("federation_sent_at IS NULL"));
+        assert!(user_sql.contains("NOT person.local"));
+        assert!(user_sql.contains("person.ap_id IS NOT NULL"));
+        assert!(user_sql.contains("person.ap_inbox IS NOT NULL"));
+        assert!(user_sql.contains("task.kind='deliver_to_inbox'"));
+        assert!(user_sql.contains("LIMIT $1"));
+    }
+
+    #[test]
+    fn janitor_completes_local_follow_undos_without_delivery() {
+        let community_sql = super::JANITOR_COMPLETE_LOCAL_COMMUNITY_FOLLOW_UNDOS_SQL;
+        let user_sql = super::JANITOR_COMPLETE_LOCAL_USER_FOLLOW_UNDOS_SQL;
+
+        assert!(community_sql.contains("INNER JOIN community"));
+        assert!(community_sql.contains("federation_received_at IS NULL"));
+        assert!(community_sql.contains("community.local"));
+        assert!(community_sql.contains("federation_sent_at=COALESCE"));
+        assert!(community_sql.contains("federation_received_at=COALESCE"));
+        assert!(community_sql.contains("LIMIT $1"));
+        assert!(community_sql.contains("FOR UPDATE OF local_community_follow_undo SKIP LOCKED"));
+
+        assert!(user_sql.contains("INNER JOIN person"));
+        assert!(user_sql.contains("federation_received_at IS NULL"));
+        assert!(user_sql.contains("person.local"));
+        assert!(user_sql.contains("federation_sent_at=COALESCE"));
+        assert!(user_sql.contains("federation_received_at=COALESCE"));
+        assert!(user_sql.contains("LIMIT $1"));
+        assert!(user_sql.contains("FOR UPDATE OF local_user_follow_undo SKIP LOCKED"));
+    }
+
+    #[test]
     fn janitor_recalculates_cached_post_likes_from_like_rows() {
         let sql = super::JANITOR_RECALCULATE_POST_LIKES_SQL;
 
@@ -2474,9 +3162,24 @@ mod tests {
         assert!(sql.contains("community.deleted"));
         assert!(sql.contains("COALESCE(community_discovery.remote_post_count, 0) < 2"));
         assert!(sql.contains("community_discovery_server.suppressed_reason IS NOT NULL"));
-        assert!(sql.contains("NOT community_discovery_server.active"));
-        assert!(sql.contains("community_discovery_server.failed_checks >= 3"));
+        assert!(!sql.contains("NOT community_discovery_server.active"));
+        assert!(!sql.contains("community_discovery_server.failed_checks >= 3"));
         assert!(sql.contains("SET active=FALSE"));
+        assert!(sql.contains("LIMIT $1"));
+        assert!(sql.contains("FOR UPDATE OF community_discovery SKIP LOCKED"));
+    }
+
+    #[test]
+    fn janitor_reactivates_current_discovered_communities() {
+        let sql = super::JANITOR_REACTIVATE_CURRENT_COMMUNITY_DISCOVERY_SQL;
+
+        assert!(sql.contains("NOT community_discovery.active"));
+        assert!(sql.contains("NOT community.deleted"));
+        assert!(sql.contains("community_discovery.remote_post_count >= 2"));
+        assert!(sql.contains("community_discovery_server.active"));
+        assert!(sql.contains("community_discovery_server.failed_checks < 3"));
+        assert!(sql.contains("community_discovery_server.suppressed_reason IS NULL"));
+        assert!(sql.contains("SET active=TRUE"));
         assert!(sql.contains("LIMIT $1"));
         assert!(sql.contains("FOR UPDATE OF community_discovery SKIP LOCKED"));
     }
@@ -2494,6 +3197,26 @@ mod tests {
         assert!(sql.contains("original_bytes"));
         assert!(sql.contains("LIMIT $1"));
         assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
+    }
+
+    #[test]
+    fn janitor_completes_irrelevant_inbox_tasks_in_batches() {
+        let sql = super::JANITOR_COMPLETE_IRRELEVANT_INBOX_TASKS_SQL;
+
+        assert!(sql.contains("state='pending'"));
+        assert!(sql.contains("verify_and_ingest_object_from_inbox"));
+        assert!(sql.contains("body_json->>'type'='Announce'"));
+        assert!(sql.contains("community_follow.accepted"));
+        assert!(sql.contains("body_json->>'type'='Delete'"));
+        assert!(sql.contains("jsonb_typeof(inbox_task.body_json->'actor')='string'"));
+        assert!(sql.contains("FROM person WHERE ap_id=delete_task.actor"));
+        assert!(sql.contains("FROM community WHERE ap_id=delete_task.actor"));
+        assert!(sql.contains("FROM post WHERE ap_id=delete_task.object_id"));
+        assert!(sql.contains("FROM reply WHERE ap_id=delete_task.object_id"));
+        assert!(sql.contains("FROM post_like WHERE ap_id=delete_task.object_id"));
+        assert!(sql.contains("FROM reply_like WHERE ap_id=delete_task.object_id"));
+        assert!(sql.contains("SET state='completed'::lt_task_state"));
+        assert!(sql.contains("LIMIT $1"));
     }
 
     #[test]
@@ -2528,14 +3251,20 @@ mod tests {
         let report = super::JanitorReport {
             repaired_community_endpoints: 1,
             requeued_community_follows: 2,
-            recalculated_post_likes: 3,
-            deactivated_discoveries: 4,
-            compacted_completed_inbox_tasks: 5,
-            failed_terminal_inbox_tasks: 6,
-            repaired_post_titles: 7,
+            requeued_community_follow_undos: 3,
+            requeued_collection_target_follow_undos: 4,
+            requeued_user_follow_undos: 5,
+            completed_local_follow_undos: 6,
+            recalculated_post_likes: 7,
+            deactivated_discoveries: 8,
+            reactivated_discoveries: 9,
+            compacted_completed_inbox_tasks: 10,
+            failed_terminal_inbox_tasks: 11,
+            completed_irrelevant_inbox_tasks: 12,
+            repaired_post_titles: 13,
         };
 
-        assert_eq!(report.total_changes(), 28);
+        assert_eq!(report.total_changes(), 91);
     }
 
     #[test]
@@ -2553,6 +3282,9 @@ mod tests {
         assert!(sql.contains("cleanup_notification_retention_days"));
         assert!(sql.contains("cleanup_failed_inbox_task_payloads_enabled"));
         assert!(sql.contains("cleanup_failed_inbox_task_payload_retention_days"));
+        assert!(sql.contains("cleanup_completed_task_retention_days"));
+        assert!(sql.contains("cleanup_failed_task_retention_days"));
+        assert!(sql.contains("cleanup_failed_inbox_task_payload_compaction_hours"));
         assert!(sql.contains("FROM site"));
         assert!(sql.contains("WHERE local"));
     }
@@ -2562,9 +3294,7 @@ mod tests {
         let sql = super::CLEANUP_OLD_NOTIFICATIONS_SQL;
 
         assert!(sql.contains("FROM notification"));
-        assert!(
-            sql.contains("created_at < current_timestamp - make_interval(days => $2::INTEGER)")
-        );
+        assert!(sql.contains("created_at < current_timestamp - make_interval(days => $2::INTEGER)"));
         assert!(sql.contains("person.last_checked_notifications"));
         assert!(sql.contains("LIMIT $1"));
         assert!(sql.contains("FOR UPDATE SKIP LOCKED"));
@@ -2611,6 +3341,8 @@ mod tests {
         assert!(sql.contains("$2 AND community.deleted"));
         assert!(sql.contains("$3 AND NOT community.deleted"));
         assert!(sql.contains("community_follow.accepted"));
+        assert!(sql.contains("community_discovery.active"));
+        assert!(sql.contains("community_discovery.remote_post_count >= 2"));
         assert!(sql.contains("NOT EXISTS (SELECT 1 FROM post WHERE post.community=community.id)"));
         assert!(sql.contains("DELETE FROM community_follow"));
         assert!(sql.contains("DELETE FROM community_moderator"));

@@ -24,7 +24,7 @@
         - one-off live instance repair rules
 */
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 /* ------------------------------------------------------------------------- */
 /* Target families                                                           */
@@ -1189,9 +1189,8 @@ fn actor_has_wp_activitypub_path(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FEDERATION_OPERATIONS, FederationOperation, GroupTarget, GroupTargetFamily,
-        OperationSupport, TARGET_SPECS, TargetActorKind, classify_actor_value,
-        classify_known_object, target_spec,
+        classify_actor_value, classify_known_object, target_spec, FederationOperation, GroupTarget,
+        GroupTargetFamily, OperationSupport, TargetActorKind, FEDERATION_OPERATIONS, TARGET_SPECS,
     };
 
     const REPORT_TARGETS: &[GroupTarget] = &[

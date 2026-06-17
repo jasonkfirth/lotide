@@ -35,11 +35,7 @@ impl Unit {
     /// assert!(Unit::centimeters().is_centimeters());
     /// ```
     pub fn is_centimeters(&self) -> bool {
-        self.0
-            .as_ref()
-            .left()
-            .map(|l| l.is_centimeters())
-            .unwrap_or(false)
+        self.0.as_ref().left().is_some_and(Length::is_centimeters)
     }
 
     /// Create a new unit measuring Meters
@@ -61,11 +57,7 @@ impl Unit {
     /// assert!(Unit::meters().is_meters());
     /// ```
     pub fn is_meters(&self) -> bool {
-        self.0
-            .as_ref()
-            .left()
-            .map(|l| l.is_meters())
-            .unwrap_or(false)
+        self.0.as_ref().left().is_some_and(Length::is_meters)
     }
 
     /// Create a new unit measuring Kilometers
@@ -87,11 +79,7 @@ impl Unit {
     /// assert!(Unit::kilometers().is_kilometers());
     /// ```
     pub fn is_kilometers(&self) -> bool {
-        self.0
-            .as_ref()
-            .left()
-            .map(|l| l.is_kilometers())
-            .unwrap_or(false)
+        self.0.as_ref().left().is_some_and(Length::is_kilometers)
     }
 
     /// Create a new unit measuring Feet
@@ -113,7 +101,7 @@ impl Unit {
     /// assert!(Unit::feet().is_feet());
     /// ```
     pub fn is_feet(&self) -> bool {
-        self.0.as_ref().left().map(|l| l.is_feet()).unwrap_or(false)
+        self.0.as_ref().left().is_some_and(Length::is_feet)
     }
 
     /// Create a new unit measuring Inches
@@ -135,11 +123,7 @@ impl Unit {
     /// assert!(Unit::inches().is_inches());
     /// ```
     pub fn is_inches(&self) -> bool {
-        self.0
-            .as_ref()
-            .left()
-            .map(|l| l.is_inches())
-            .unwrap_or(false)
+        self.0.as_ref().left().is_some_and(Length::is_inches)
     }
 
     /// Create a new custom unit
@@ -175,7 +159,7 @@ impl Unit {
     /// assert!(Unit::custom("Yards").as_custom() == Some("Yards"));
     /// ```
     pub fn as_custom(&self) -> Option<&str> {
-        self.0.as_ref().right().map(|r| r.as_str())
+        self.0.as_ref().right().map(String::as_str)
     }
 }
 

@@ -106,7 +106,7 @@ Core contract:
 - post by mentioning or addressing the actor
 - receive forwarded or announced content
 - dedupe aggressively
-- do not expect full delete, moderation, vote, or thread behavior
+- do not expect rich delete, moderation, vote, or thread semantics
 
 Adversarial expectations:
 
@@ -283,17 +283,17 @@ Required or best-effort for relay bots:
 
 These targets are candidates for manual federation testing. Public pages,
 WebFinger, and actor fetches can show that an actor exists, but they do not
-prove that the remote inbox accepts signed activity from the tested Lotide
-host. Confirm that with signed `Follow`, `Undo{Follow}`, `Like`, and
-`Undo{Like}` probes where those activities make sense for the target.
+prove that the remote inbox accepts signed activity from lotide.example. The
+proof step is still a signed `Follow`, `Undo{Follow}`, `Like`, and
+`Undo{Like}` where the target semantics make those activities meaningful.
 
 | Target | Candidate actor | Registry target | Notes |
 | --- | --- | --- | --- |
-| Diggita Lemmy | `!opensource@diggita.com` | Lemmy | Replacement Lemmy target because Diggita publicly lists the tested Lotide host as linked, not blocked. Also try `!tecnologia@diggita.com`, `!linux@diggita.com`, and `!fediverso@diggita.com`. |
-| Lemmy English fallback | `!opensource@lemmy.world` | Lemmy | Fallback target. Prior visible Lotide-origin content suggests delivery can work, but Cloudflare/proxy behavior still needs a live signed test. |
+| Diggita Lemmy | `!opensource@diggita.com` | Lemmy | High-confidence replacement for programming.dev-style mechanical Lemmy tests because Diggita publicly lists lotide.example as linked, not blocked. Also try `!tecnologia@diggita.com`, `!linux@diggita.com`, and `!fediverso@diggita.com`. |
+| Lemmy English fallback | `!opensource@lemmy.world` | Lemmy | Medium-confidence fallback. Prior visible Lotide-origin content suggests delivery can work, but Cloudflare/proxy behavior still needs a live signed test. |
 | Kbin | no current live target | Kbin | Keep source and packet fixtures for true Kbin 0.10.1 behavior. Public instance lists still mention Kbin hosts, but the June 2026 audit found them dead, parked, Cloudflare-blocked, or actually running Mbin. Do not use kbin-named hosts as proof of Kbin unless the actor metadata identifies Kbin. |
 | Mbin | `https://thebrainbin.org/m/AskMbin` | Mbin | Active magazine with public API entries. Use this before `@updates@kbin.melroy.org`, which resolved but had no useful preview posts during the audit. |
-| Mbin alternates | `thebrainbin.org`, `k.fe.derate.me`, `gehirneimer.de`, `moist.catsweat.com` | Mbin | Pick a local magazine from the UI and test that actor directly. Avoid making fedia.io the first fallback target because some browser/API paths can return login or 403 responses. |
+| Mbin alternates | `thebrainbin.org`, `k.fe.derate.me`, `gehirneimer.de`, `moist.catsweat.com` | Mbin | Pick a local magazine from the UI and test that actor directly. Avoid making fedia.io the first low-friction target because some browser/API paths can return login or 403 responses. |
 | Bonfire | `&Bonfire_Design@demo.bonfire.cafe` | Bonfire | Live Bonfire demo group. Treat as its own dialect, not Lemmy. Test Follow, Undo Follow, Like, Undo Like, and inbound Announce/Create behavior. |
 | Bonfire alternate | `&Demo_group_1@demo.bonfire.cafe` | Bonfire | Same demo instance and useful as a second Bonfire Group actor. |
 | Mobilizon | `@framasoft@mobilizon.fr` | Mobilizon | Group actor with event/community-organizing semantics. Test Follow, receive Event/Article/Note, Update, and Delete. Do not use it as primary Like proof unless a specific object accepts likes. |
@@ -302,7 +302,7 @@ host. Confirm that with signed `Follow`, `Undo{Follow}`, `Like`, and
 | Flipboard magazine | `https://flipboard.com/@mia/fedi-curious-fdg527fez` | Flipboard | Current magazine pages advertise `/magazines/...` as an ActivityPub alternate link. Keep magazine URL handling separate from user WebFinger, and derive the Lotide community from the magazine actor rather than the profile actor. If an outer Announce identifies the magazine but the inner object does not address it, derive the Lotide community from the outer Announce actor. Follow, Like, and Undo Like are accepted by the live service; comment readback is not proven because live post objects omit public reply collections even when the web page reports comments. |
 | WordPress blog actor | `@blog@vivaldi.com` | WordPress | Passive WebFinger on June 4, 2026 resolved this to a Group actor at `https://vivaldi.com/?author=0`. Actor IDs, not preferredUsername alone, must drive dedupe because multiple language variants can share handle-like names. |
 | Funkwhale library | `https://audio.anartist.org/federation/music/libraries/2ac0f854-cc34-40c5-a98e-2bda535a9134` | Funkwhale | Public `Library` collection object with an owner actor and populated collection pages. Lotide stores the followed collection separately from the owner inbox and now displays a bounded preview of Audio-like items. |
-| WordPress Event Bridge | no fixed target yet | WordPressEventBridge | Event object producer. The Event Federation site documents the plugin, but this pass did not find a live event actor. Use this target to test that incoming Event objects do not corrupt post/comment assumptions. |
+| WordPress Event Bridge | no fixed target yet | WordPressEventBridge | Event object producer. The Event Federation site documents the plugin but did not expose an obvious live event actor in this pass. Useful for ensuring incoming Event objects do not corrupt post/comment assumptions. |
 | Elgg ActivityPub | `@activitypubgroup@demo.wzm.me` | Elgg | Demo group target for Elgg's ActivityPub plugin. Test Follow, Join/Leave if exposed, Create, Like, Undo Like, and Delete. |
 | Gancio | `gancio@gancio.cisti.org` | Gancio | Passive WebFinger on June 4, 2026 found `events@gancio.cisti.org` returned 404 and `gancio@gancio.cisti.org` resolved to an Application actor. Test Follow, receive Event, Update, and Delete. Likes are not the main compatibility proof. |
 | FediGroups | `@homelab@fedigroups.social` | FediGroups | Passive WebFinger on June 4, 2026 resolved this to a Service actor under `/users/homelab`. Current best replacement for Guppe/Fedigroup/AP-Groups/tootgroup-style relay tests. Test Follow, public mention, boost/announce receipt, and dedupe. |
@@ -312,8 +312,8 @@ host. Confirm that with signed `Follow`, `Undo{Follow}`, `Like`, and
 | Friendica forums | `helpers@forum.friendi.ca`, `admins@forum.friendi.ca`, `news@forum.friendi.ca` | Friendica | Forum profile behavior. Test normal mention and Friendica-style `!group@host` addressing if Lotide can represent it. |
 | Hubzilla forum | `adminsforum@hubzilla.org`, `info@hubzilla.org` | Hubzilla | Channel/forum semantics. Expect actor-authored posts as well as forwarded content. |
 | Streams/Forte | no current group target | StreamsForte | `linuxuserspace@podcastindex.social` was a bad candidate, and `macgirvin.com/channel/mike` is a Person actor. Keep looking for a current group or forum channel before signed testing. |
-| Group Actor | `@hob@piggo.space` | GroupActor | Unconfirmed live target. Treat as relay behavior until WebFinger and signed Follow verify it. |
-| Smithereen | none found | Smithereen | No reliable current public group target yet. Use source-derived fixtures or a self-hosted instance until a live actor is provided. |
+| Group Actor | `@hob@piggo.space` | GroupActor | Low-confidence live target. Treat as source-code-backed relay semantics until WebFinger and signed Follow prove it. |
+| Smithereen | none found | Smithereen | No reliable current public group target yet. Treat as source-code or self-host testing until a live actor is provided. |
 | AP-Groups/chirp | none found | ApGroups | Old chirp.social appears dead. Use FediGroups for live relay behavior. |
 | Old Guppe | none recommended | Guppe | Old a.gup.pe paths are not safe primary targets. Use FediGroups for live tests. |
 

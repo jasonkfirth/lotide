@@ -178,7 +178,7 @@ pub struct Ext4<Inner, A, B, C, D> {
 
 impl<Inner, A> Ext1<Inner, A> {
     pub fn new(inner: Inner, ext_one: A) -> Self {
-        Ext1 { inner, ext_one }
+        Ext1 { ext_one, inner }
     }
 
     pub fn into_parts(self) -> (Inner, A) {
@@ -187,9 +187,9 @@ impl<Inner, A> Ext1<Inner, A> {
 
     pub fn extend<B>(self, ext_two: B) -> Ext2<Inner, A, B> {
         Ext2 {
-            inner: self.inner,
             ext_one: self.ext_one,
             ext_two,
+            inner: self.inner,
         }
     }
 }
@@ -197,9 +197,9 @@ impl<Inner, A> Ext1<Inner, A> {
 impl<Inner, A, B> Ext2<Inner, A, B> {
     pub fn new(inner: Inner, ext_one: A, ext_two: B) -> Self {
         Ext2 {
-            inner,
             ext_one,
             ext_two,
+            inner,
         }
     }
 
@@ -209,10 +209,10 @@ impl<Inner, A, B> Ext2<Inner, A, B> {
 
     pub fn extend<C>(self, ext_three: C) -> Ext3<Inner, A, B, C> {
         Ext3 {
-            inner: self.inner,
             ext_one: self.ext_one,
             ext_two: self.ext_two,
             ext_three,
+            inner: self.inner,
         }
     }
 }
@@ -220,10 +220,10 @@ impl<Inner, A, B> Ext2<Inner, A, B> {
 impl<Inner, A, B, C> Ext3<Inner, A, B, C> {
     pub fn new(inner: Inner, ext_one: A, ext_two: B, ext_three: C) -> Self {
         Ext3 {
-            inner,
             ext_one,
             ext_two,
             ext_three,
+            inner,
         }
     }
 
@@ -233,11 +233,11 @@ impl<Inner, A, B, C> Ext3<Inner, A, B, C> {
 
     pub fn extend<D>(self, ext_four: D) -> Ext4<Inner, A, B, C, D> {
         Ext4 {
-            inner: self.inner,
             ext_one: self.ext_one,
             ext_two: self.ext_two,
             ext_three: self.ext_three,
             ext_four,
+            inner: self.inner,
         }
     }
 }
@@ -245,11 +245,11 @@ impl<Inner, A, B, C> Ext3<Inner, A, B, C> {
 impl<Inner, A, B, C, D> Ext4<Inner, A, B, C, D> {
     pub fn new(inner: Inner, ext_one: A, ext_two: B, ext_three: C, ext_four: D) -> Self {
         Ext4 {
-            inner,
             ext_one,
             ext_two,
             ext_three,
             ext_four,
+            inner,
         }
     }
 
@@ -278,7 +278,7 @@ where
         let mut inner = Inner::extends(base)?;
         let ext_one = A::try_from_unparsed(&mut inner)?;
 
-        Ok(Ext1 { inner, ext_one })
+        Ok(Ext1 { ext_one, inner })
     }
 
     fn retracts(self) -> Result<Base<Self::Kind>, Self::Error> {
@@ -306,9 +306,9 @@ where
         let ext_two = B::try_from_unparsed(&mut inner)?;
 
         Ok(Ext2 {
-            inner,
             ext_one,
             ext_two,
+            inner,
         })
     }
 
@@ -344,10 +344,10 @@ where
         let ext_three = C::try_from_unparsed(&mut inner)?;
 
         Ok(Ext3 {
-            inner,
             ext_one,
             ext_two,
             ext_three,
+            inner,
         })
     }
 
@@ -387,11 +387,11 @@ where
         let ext_four = D::try_from_unparsed(&mut inner)?;
 
         Ok(Ext4 {
-            inner,
             ext_one,
             ext_two,
             ext_three,
             ext_four,
+            inner,
         })
     }
 

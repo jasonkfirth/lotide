@@ -1353,7 +1353,8 @@
 											"$ref": "#/components/schemas/Content"
 										},
 										"web_push_vapid_key": {
-											"type": "string"
+											"type": "string",
+											"description": "Reserved for legacy browser push clients. Current builds return an empty string because browser push delivery is disabled."
 										},
 										"signup_allowed": {
 											"type": "boolean"
@@ -2593,7 +2594,8 @@
 		},
 		"/api/unstable/users/~me/notifications:subscriptions": {
 			"post": {
-				"summary": "Create a notifications subscription",
+				"summary": "Create a browser notification subscription",
+				"description": "Browser push delivery is disabled in this build. The route is kept as a compatibility stub for older clients.",
 				"requestBody": {
 					"required": true,
 					"content": {
@@ -2621,21 +2623,8 @@
 					}
 				},
 				"responses": {
-					"200": {
-						"description": "Successfully registered subscription",
-						"content": {
-							"application/json": {
-								"schema": {
-									"type": "object",
-									"required": ["id"],
-									"properties": {
-										"id": {
-											"type": "integer"
-										}
-									}
-								}
-							}
-						}
+					"501": {
+						"description": "Browser push notifications are not available in this build"
 					}
 				}
 			}

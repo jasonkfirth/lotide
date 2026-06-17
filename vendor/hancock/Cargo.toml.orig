@@ -6,6 +6,9 @@ edition = "2018"
 license = "MIT"
 repository = "https://git.sr.ht/~vpzom/hancock"
 description = "Implementation-agnostic HTTP Signature helper"
+readme = "README.md"
+keywords = ["http-signatures", "activitypub", "federation"]
+categories = ["web-programming", "network-programming"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

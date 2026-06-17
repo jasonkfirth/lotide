@@ -34,5 +34,3 @@ user_name_disallowed_chars = Nutzername beinhaltet unerlaubte Zeichen
 user_no_avatar = Dieser Nutzer hat keinen Avatar
 user_suspended_error = Dieser Account wurde gesperrt
 
-notification_title_user_follow = Neuer Follower
-notification_body_user_follow = { $username } folgt dir

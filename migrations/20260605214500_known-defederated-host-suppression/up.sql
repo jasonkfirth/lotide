@@ -28,24 +28,24 @@ VALUES
         'programming.dev',
         TRUE,
         current_timestamp,
-        'Known domain block: programming.dev rejected community inbox delivery from the local Lotide host during live compatibility testing.',
-        'Known domain block: programming.dev rejected community inbox delivery from the local Lotide host during live compatibility testing.',
+        'Known domain block: programming.dev rejected lotide.example community inbox delivery during live compatibility testing.',
+        'Known domain block: programming.dev rejected lotide.example community inbox delivery during live compatibility testing.',
         current_timestamp
     ),
     (
         'lemmy.blahaj.zone',
         TRUE,
         current_timestamp,
-        'Known domain block: lemmy.blahaj.zone rejected Like delivery from the local Lotide host during live compatibility testing.',
-        'Known domain block: lemmy.blahaj.zone rejected Like delivery from the local Lotide host during live compatibility testing.',
+        'Known domain block: lemmy.blahaj.zone rejected lotide.example Like delivery during live compatibility testing.',
+        'Known domain block: lemmy.blahaj.zone rejected lotide.example Like delivery during live compatibility testing.',
         current_timestamp
     ),
     (
         'lemmy.dbzer0.com',
         TRUE,
         current_timestamp,
-        'Known domain block: lemmy.dbzer0.com rejected Like delivery from the local Lotide host during live compatibility testing.',
-        'Known domain block: lemmy.dbzer0.com rejected Like delivery from the local Lotide host during live compatibility testing.',
+        'Known domain block: lemmy.dbzer0.com rejected lotide.example Like delivery during live compatibility testing.',
+        'Known domain block: lemmy.dbzer0.com rejected lotide.example Like delivery during live compatibility testing.',
         current_timestamp
     )
 ON CONFLICT (host) DO UPDATE SET

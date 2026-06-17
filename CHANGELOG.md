@@ -2,11 +2,57 @@
 
 All notable local changes to this Lotide fork are recorded here.
 
-## 0.17.0 - 2026-06-10
+## 0.17.1 - 2026-06-11
+
+### Release Follow-up - 2026-06-17
+
+- Fixed follow Undo delivery repair so deleted remote communities still receive
+  an upstream Undo while local follow Undo rows are completed locally as
+  no-op federation work.
+- Fixed community follow Undo delivery to use the community shared inbox when a
+  dedicated inbox is not known.
+
+### Release Hygiene - 2026-06-16
+
+- Added `cargo-deny` policy files and verified advisories, crate bans, and
+  source policies for the release tree.
+- Updated dependency locks to clear current RustSec advisories, including the
+  PostgreSQL protocol parser and AWS/rustls dependency chain used by optional
+  S3 media storage.
+- Removed stale unused dependencies and added narrow `cargo-machete`
+  exceptions where derives or generated code make usage non-obvious.
+- Removed the unused browser Web Push transport from the default build path.
+  Lotide still keeps in-site notification rows and legacy task names, but the
+  subscription endpoint now reports that browser push is not available.
+- Cleaned vendored crate metadata, readmes, doc comments, and doctests so
+  vendored dependencies are easier to audit before upstreaming.
+- Verified the release tree with `cargo fmt --all --check`, strict workspace
+  Clippy with warnings denied, `cargo audit`, `cargo deny`, `cargo machete`,
+  rustdoc with warnings denied, workspace doctests, 324 Lotide unit tests, and
+  PostgreSQL-backed ActivityPub integration tests on a disposable database.
+
+### Runtime Hardening - 2026-06-16
+
+- Added a dedicated inbox verification worker lane so large inbound bursts no
+  longer starve discovery, outbox previews, or remote readback tasks.
+- Added a dedicated readback worker lane for followed outbox refreshes,
+  post/comment reply recovery, remote post confirmation, and platform thread
+  refreshes.
+- Added conservative pre-verification skips for untracked remote `Announce`
+  activity and irrelevant remote `Delete` activity that cannot affect known
+  local state.
+- Added routine janitor and task-cleanup handling for that irrelevant inbox
+  traffic so future bursts are completed in bounded batches.
+- Added a per-host cap for pending platform-thread readback tasks so a busy
+  remote host cannot monopolize the readback queue with historical refreshes.
+- Added regression tests for the new worker lanes, irrelevant inbox cleanup,
+  and platform-thread host cap.
+- Verified the live release build with 324 Lotide unit tests and
+  `cargo clippy --bin lotide -- -D warnings`.
 
 ### Added
 
-- Added ActivityPub target profiling for group-like software families,
+- Added broad ActivityPub target profiling for group-like software families,
   including Lotide, Lemmy, PieFed, Mbin, NodeBB, Discourse, Friendica,
   PeerTube, Mobilizon, Hubzilla, Bonfire, Elgg, Gancio, FediGroups, Fedibird
   group servers, Group Actor, WordPress, Flipboard, and Funkwhale libraries.
@@ -31,20 +77,18 @@ All notable local changes to this Lotide fork are recorded here.
   janitor controls.
 - Added local user avatar/profile image upload and publication through the
   ActivityPub actor document.
-- Added configurable bind addresses so Lotide can listen on an external
-  interface when a deployment needs that.
-- Added Debian, MSYS2, and Haiku-oriented build scripts, plus a Linux ARM64
-  build proof.
+- Added configurable bind addresses. The default is now localhost for safer
+  installs; existing deployments that expose Lotide directly must set
+  `BIND_ADDRESS=0.0.0.0` or a specific interface address.
+- Added Debian build and install scripts for project-local deployment. The
+  broader workspace also contains MSYS2, Haiku, and Linux ARM64 proof helpers.
 - Added W3C ActivityStreams fixture coverage through the vendored
   `activitystreams` crate.
 
 ### Changed
 
 - Updated the project to Rust 2024 and bumped the local release version to
-  `0.17.0`.
-- Changed the default backend bind address to `127.0.0.1`. Direct-exposure
-  deployments must set `BIND_ADDRESS` to `0.0.0.0`, `::`, or a specific
-  interface address.
+  `0.17.1`.
 - Modernized the HTTP stack to Hyper 1, `http` 1, `headers` 0.4,
   `hyper-util`, and `http-body-util`.
 - Updated direct HTML parser dependencies to current `html5ever` and
@@ -110,7 +154,7 @@ All notable local changes to this Lotide fork are recorded here.
   status tests.
 - Added task-scheduler, janitor, discovery, and terminal-error classification
   tests.
-- Reran the live signed federation matrix after the HTTP modernization. The
-  representative matrix passed for 19 target families.
+- Reran the live signed, low-impact federation matrix after the HTTP
+  modernization. The representative matrix was green for 19 target families.
 
 <!-- end of CHANGELOG.md -->

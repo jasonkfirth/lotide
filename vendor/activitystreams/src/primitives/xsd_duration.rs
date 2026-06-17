@@ -139,12 +139,10 @@ impl std::str::FromStr for XsdDuration {
         let negative = Some(0) == s.find('-');
         let s = s.trim_start_matches('-');
 
-        let (large, small) = if let Some(index) = s.find('T') {
+        let (large, small) = s.find('T').map_or((s, ""), |index| {
             let (l, s) = s.split_at(index);
             (l, s.trim_start_matches('T'))
-        } else {
-            (s, "")
-        };
+        });
 
         let (years, large) = parse_next(large, 'Y')?;
         let (months, large) = parse_next(large, 'M')?;
@@ -196,7 +194,7 @@ impl std::fmt::Display for XsdDuration {
         duration -= time::Duration::days(duration.whole_days());
 
         let s = if duration.whole_seconds() > 0 {
-            format!("{}T", s)
+            format!("{s}T")
         } else {
             s
         };

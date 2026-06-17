@@ -1628,7 +1628,10 @@ pub trait ObjectExt: AsObject {
     /// }
     /// ```
     fn take_start_time(&mut self) -> Option<OffsetDateTime> {
-        self.object_mut().start_time.take().map(|d| d.into_inner())
+        self.object_mut()
+            .start_time
+            .take()
+            .map(XsdDateTime::into_inner)
     }
 
     /// Delete the start_time from the current object
@@ -1706,7 +1709,10 @@ pub trait ObjectExt: AsObject {
     /// }
     /// ```
     fn take_end_time(&mut self) -> Option<OffsetDateTime> {
-        self.object_mut().end_time.take().map(|d| d.into_inner())
+        self.object_mut()
+            .end_time
+            .take()
+            .map(XsdDateTime::into_inner)
     }
 
     /// Delete the end_time from the current object
@@ -1785,7 +1791,10 @@ pub trait ObjectExt: AsObject {
     /// }
     /// ```
     fn take_duration(&mut self) -> Option<Duration> {
-        self.object_mut().duration.take().map(|d| d.into_inner())
+        self.object_mut()
+            .duration
+            .take()
+            .map(XsdDuration::into_inner)
     }
 
     /// Delete the duration from the current object
@@ -1864,7 +1873,10 @@ pub trait ObjectExt: AsObject {
     /// }
     /// ```
     fn take_published(&mut self) -> Option<OffsetDateTime> {
-        self.object_mut().published.take().map(|d| d.into_inner())
+        self.object_mut()
+            .published
+            .take()
+            .map(XsdDateTime::into_inner)
     }
 
     /// Delete the published from the current object
@@ -1942,7 +1954,10 @@ pub trait ObjectExt: AsObject {
     /// }
     /// ```
     fn take_updated(&mut self) -> Option<OffsetDateTime> {
-        self.object_mut().updated.take().map(|d| d.into_inner())
+        self.object_mut()
+            .updated
+            .take()
+            .map(XsdDateTime::into_inner)
     }
 
     /// Delete the updated from the current object
@@ -3076,7 +3091,7 @@ pub trait ApObjectExt: AsApObject {
         I: IntoIterator<Item = U>,
         U: Into<IriString>,
     {
-        let v: Vec<IriString> = items.into_iter().map(|u| u.into()).collect();
+        let v: Vec<IriString> = items.into_iter().map(Into::into).collect();
         self.ap_object_mut().upload_media = Some(v.into());
         self
     }
@@ -4188,7 +4203,10 @@ pub trait TombstoneExt: AsTombstone {
     /// }
     /// ```
     fn take_deleted(&mut self) -> Option<OffsetDateTime> {
-        self.tombstone_mut().deleted.take().map(|d| d.into_inner())
+        self.tombstone_mut()
+            .deleted
+            .take()
+            .map(XsdDateTime::into_inner)
     }
 
     /// Delete the deleted from the current object

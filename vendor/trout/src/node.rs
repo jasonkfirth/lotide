@@ -125,8 +125,8 @@ pub struct Node<P, R: Request, T, C> {
 impl<P, R: Request, T, C> Default for Node<P, R, T, C> {
     fn default() -> Self {
         Self {
-            handlers: Default::default(),
-            children: Default::default(),
+            handlers: HashMap::default(),
+            children: Vec::default(),
         }
     }
 }
@@ -134,19 +134,21 @@ impl<P, R: Request, T, C> Default for Node<P, R, T, C> {
 impl<P: 'static, R: Request + 'static, T: 'static, C: 'static> Node<P, R, T, C> {
     /// Construct a new Node
     pub fn new() -> Self {
-        Default::default()
+        Node::default()
     }
 
     /// Add a method handler to this node.
-    /// For use with async, you may wish to use [`with_handler_async`] instead.
+    /// For use with async, you may wish to use [`Node::with_handler_async`] instead.
+    #[must_use]
     pub fn with_handler(
         mut self,
         method: R::Method,
         handler: impl Fn(P, C, R) -> T + 'static + Send + Sync,
     ) -> Self {
-        if self.handlers.insert(method, Box::new(handler)).is_some() {
-            panic!("Tried to add multiple handlers for the same method");
-        }
+        assert!(
+            self.handlers.insert(method, Box::new(handler)).is_none(),
+            "Tried to add multiple handlers for the same method"
+        );
 
         self
     }
@@ -156,10 +158,11 @@ impl<P: 'static, R: Request + 'static, T: 'static, C: 'static> Node<P, R, T, C> 
     ///
     /// # Example
     /// ```rust
-    /// # let other_node = trout::Node::new();
-    /// trout::Node::new()
+    /// # let other_node: trout::Node<(), String, (), ()> = trout::Node::new();
+    /// trout::Node::<(), String, (), ()>::new()
     ///     .with_child("items", other_node);
     /// ```
+    #[must_use]
     pub fn with_child(mut self, path: &'static str, child: Node<P, R, T, C>) -> Self {
         self.children.push(Box::new(ChildPathStr(path, child)));
 
@@ -169,10 +172,11 @@ impl<P: 'static, R: Request + 'static, T: 'static, C: 'static> Node<P, R, T, C> 
     /// Add a child node with a dynamic path segment (string form)
     /// # Example
     /// ```rust
-    /// # let other_node = trout::Node::new();
-    /// trout::Node::new()
-    ///     .with_child_str(other_node)
+    /// # let other_node: trout::Node<(String,), String, (), ()> = trout::Node::new();
+    /// trout::Node::<(), String, (), ()>::new()
+    ///     .with_child_str(other_node);
     /// ```
+    #[must_use]
     pub fn with_child_str<P2: TupleAdd<P, String> + 'static>(
         mut self,
         child: Node<P2, R, T, C>,
@@ -186,10 +190,11 @@ impl<P: 'static, R: Request + 'static, T: 'static, C: 'static> Node<P, R, T, C> 
     /// Add a child node with a dynamic path segment (parsing form)
     /// # Example
     /// ```rust
-    /// # let other_node = trout::Node::new();
-    /// trout::Node::new()
-    ///     .with_child_parse::<i32, _>(other_node)
+    /// # let other_node: trout::Node<(i32,), String, (), ()> = trout::Node::new();
+    /// trout::Node::<(), String, (), ()>::new()
+    ///     .with_child_parse::<i32, _>(other_node);
     /// ```
+    #[must_use]
     pub fn with_child_parse<
         A: std::str::FromStr + Send + Sync + 'static,
         P2: TupleAdd<P, A> + 'static,
@@ -230,6 +235,7 @@ impl<P: 'static, R: Request + 'static, TR: 'static, C: 'static>
     Node<P, R, std::pin::Pin<Box<dyn std::future::Future<Output = TR> + Send>>, C>
 {
     /// Convenience method for handlers returning `Pin<Box<Future>>`s
+    #[must_use]
     pub fn with_handler_async<F: std::future::Future<Output = TR> + Send + 'static>(
         self,
         method: R::Method,

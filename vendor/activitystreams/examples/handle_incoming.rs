@@ -14,7 +14,7 @@ pub enum AcceptedTypes {
 
 pub type AcceptedActivity = ActorAndObject<AcceptedTypes>;
 
-pub fn handle_activity(activity: AcceptedActivity) -> Result<(), anyhow::Error> {
+pub fn handle_activity(activity: &AcceptedActivity) -> Result<(), anyhow::Error> {
     println!("Actor: {:?}", activity.actor());
     println!("Object: {:?}", activity.object());
 
@@ -36,5 +36,5 @@ pub fn handle_activity(activity: AcceptedActivity) -> Result<(), anyhow::Error> 
 static EXAMPLE_JSON: &str = r#"{"id":"https://asonix.dog/activities/1","actor":"https://asonix.dog/users/asonix","object":"https://asonix.dog/users/asonix/posts/1","type":"Announce"}"#;
 
 fn main() -> Result<(), anyhow::Error> {
-    handle_activity(serde_json::from_str(EXAMPLE_JSON)?)
+    handle_activity(&serde_json::from_str(EXAMPLE_JSON)?)
 }

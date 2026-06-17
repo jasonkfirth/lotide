@@ -78,9 +78,9 @@ impl<'de> Deserialize<'de> for XsdBoolean {
         let helper: Either<u8, bool> = Deserialize::<'de>::deserialize(deserializer)?;
 
         match helper {
-            Either::Left(u @ 0 | u @ 1) => Ok(XsdBoolean(u == 1)),
+            Either::Left(u @ (0 | 1)) => Ok(XsdBoolean(u == 1)),
             Either::Right(b) => Ok(XsdBoolean(b)),
-            _ => Err(serde::de::Error::custom("Invalid boolean")),
+            Either::Left(_) => Err(serde::de::Error::custom("Invalid boolean")),
         }
     }
 }

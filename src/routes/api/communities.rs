@@ -2,11 +2,11 @@ use super::{CommunitiesSortType, InvalidPage, ValueConsumer, format_number_58, p
 use crate::hyper;
 use crate::lang;
 use crate::types::{
-    CommunityLocalID, ImageHandling, PostLocalID, RespAvatarInfo, RespCommunityFeeds,
-    RespCommunityFeedsType, RespCommunityInfo, RespCommunityLastPostInfo, RespCommunityModlogEvent,
-    RespCommunityModlogEventDetails, RespCommunityVisibilitySuppression, RespList,
-    RespMinimalAuthorInfo, RespMinimalCommunityInfo, RespMinimalPostInfo, RespModeratorInfo,
-    RespYourFollowInfo, UserLocalID,
+    CommunityLocalID, ImageHandling, PostLocalID, RespAvatarInfo, RespCommunityDiscoveryInfo,
+    RespCommunityFeeds, RespCommunityFeedsType, RespCommunityInfo, RespCommunityLastPostInfo,
+    RespCommunityModlogEvent, RespCommunityModlogEventDetails, RespCommunityVisibilitySuppression,
+    RespList, RespMinimalAuthorInfo, RespMinimalCommunityInfo, RespMinimalPostInfo,
+    RespModeratorInfo, RespYourFollowInfo, UserLocalID,
 };
 use serde_derive::Deserialize;
 use std::borrow::Cow;
@@ -601,7 +601,13 @@ async fn route_unstable_communities_list(
     let total_count = db.query_one(&count_sql, &values).await?.get(0);
 
     let mut sql = String::from(COMMUNITY_LIST_BASE_SELECT_SQL);
-    write!(sql, ", {COMMUNITY_SOFTWARE_SQL} AS community_software ").unwrap();
+    write!(
+        sql,
+        ", {COMMUNITY_SOFTWARE_SQL} AS community_software, \
+        discovery_stats.host, discovery_stats.last_seen::TEXT, \
+        discovery_server.last_success::TEXT "
+    )
+    .unwrap();
 
     if let Some(user) = &include_your_for {
         values.push(user);
@@ -708,7 +714,7 @@ async fn route_unstable_communities_list(
         let moderated_communities: Vec<_> = rows
             .iter()
             .filter_map(|row| {
-                if row.get(19) {
+                if row.get(22) {
                     Some(CommunityLocalID(row.get(0)))
                 } else {
                     None
@@ -758,9 +764,12 @@ async fn route_unstable_communities_list(
                 };
 
                 let remote_post_count = row.get(13);
+                let discovery_host: Option<&str> = row.get(15);
+                let discovery_last_seen: Option<&str> = row.get(16);
+                let discovery_server_last_success: Option<&str> = row.get(17);
 
                 let you_are_moderator = if query.include_your {
-                    Some(row.get(19))
+                    Some(row.get(22))
                 } else {
                     None
                 };
@@ -818,13 +827,13 @@ async fn route_unstable_communities_list(
 
                     you_are_moderator,
                     your_follow: if query.include_your {
-                        Some(row.get::<_, Option<bool>>(15).map(|accepted| {
+                        Some(row.get::<_, Option<bool>>(18).map(|accepted| {
                             community_follow_info(
                                 local,
-                                row.get::<_, Option<bool>>(16).unwrap_or(false),
+                                row.get::<_, Option<bool>>(19).unwrap_or(false),
                                 accepted,
-                                row.get::<_, Option<bool>>(17).unwrap_or(false),
-                                row.get::<_, Option<bool>>(18).unwrap_or(false),
+                                row.get::<_, Option<bool>>(20).unwrap_or(false),
+                                row.get::<_, Option<bool>>(21).unwrap_or(false),
                             )
                         }))
                     } else {
@@ -832,10 +841,22 @@ async fn route_unstable_communities_list(
                     },
                     last_post,
                     remote_post_count,
+                    discovery: if discovery_host.is_some()
+                        || discovery_last_seen.is_some()
+                        || discovery_server_last_success.is_some()
+                    {
+                        Some(RespCommunityDiscoveryInfo {
+                            host: discovery_host.map(Cow::Borrowed),
+                            last_seen: discovery_last_seen.map(str::to_owned),
+                            server_last_success: discovery_server_last_success.map(str::to_owned),
+                        })
+                    } else {
+                        None
+                    },
                     latest_unfollow_status: if query.include_your {
                         match (
-                            row.get::<_, Option<bool>>(20),
-                            row.get::<_, Option<bool>>(21),
+                            row.get::<_, Option<bool>>(23),
+                            row.get::<_, Option<bool>>(24),
                         ) {
                             (Some(sent), Some(received)) => super::local_remote_federation_status(
                                 true, local, false, sent, received,
@@ -1112,16 +1133,32 @@ async fn route_unstable_communities_get(
     } else {
         row.get(6)
     };
-    let community_has_posts: bool = if query.include_your {
-        row.get(12)
-    } else {
-        row.get(7)
-    };
-    let remote_post_count = if query.include_your {
+    let remote_post_count: Option<i64> = if query.include_your {
         row.get(13)
     } else {
         row.get(8)
     };
+    let discovery_row = db
+        .query_opt(
+            "SELECT community_discovery.host, community_discovery.last_seen::TEXT, \
+                community_discovery.remote_post_count, \
+                community_discovery_server.last_success::TEXT \
+            FROM community_discovery \
+            LEFT JOIN community_discovery_server \
+                ON community_discovery_server.host=community_discovery.host \
+            WHERE community_discovery.community=$1 \
+            AND community_discovery.active \
+            ORDER BY community_discovery.remote_post_count DESC NULLS LAST, \
+                community_discovery.last_seen DESC NULLS LAST \
+            LIMIT 1",
+            &[&community_id],
+        )
+        .await?;
+    let remote_post_count = remote_post_count.or_else(|| {
+        discovery_row
+            .as_ref()
+            .and_then(|row| row.get::<_, Option<i64>>(2))
+    });
 
     if let Some(user) = include_your_for {
         if !community_local
@@ -1139,7 +1176,7 @@ async fn route_unstable_communities_get(
         }
     }
 
-    if !community_local && !community_has_posts {
+    if !community_local {
         if let Some(outbox_url) =
             community_ap_outbox.and_then(|value| value.parse::<url::Url>().ok())
         {
@@ -1239,6 +1276,13 @@ async fn route_unstable_communities_get(
         },
         last_post: None,
         remote_post_count,
+        discovery: discovery_row
+            .as_ref()
+            .map(|row| RespCommunityDiscoveryInfo {
+                host: row.get::<_, Option<&str>>(0).map(Cow::Borrowed),
+                last_seen: row.get::<_, Option<&str>>(1).map(str::to_owned),
+                server_last_success: row.get::<_, Option<&str>>(3).map(str::to_owned),
+            }),
         latest_unfollow_status,
 
         visibility_suppression: visibility_suppression
@@ -2122,7 +2166,8 @@ mod tests {
     #[test]
     fn community_list_selects_discovered_remote_post_count() {
         let sql = format!(
-            "{}, {} AS community_software {}",
+            "{}, {} AS community_software, discovery_stats.host, \
+            discovery_stats.last_seen::TEXT, discovery_server.last_success::TEXT {}",
             super::COMMUNITY_LIST_BASE_SELECT_SQL,
             super::COMMUNITY_SOFTWARE_SQL,
             super::COMMUNITY_LIST_ROW_FROM_SQL
@@ -2134,10 +2179,12 @@ mod tests {
         assert!(sql.contains("community_host.host"));
         assert!(sql.contains("community_discovery AS discovery_stats"));
         assert!(sql.contains("discovery_stats.community=community.id"));
+        assert!(sql.contains("discovery_stats.last_seen"));
+        assert!(sql.contains("discovery_server.last_success"));
         assert!(!sql.contains("max(remote_post_count)"));
         assert!(sql.contains("community_discovery_server AS discovery_server"));
         assert!(sql.contains("community_software"));
-        assert!(sql.contains("community_software FROM community"));
+        assert!(sql.contains("community_software, discovery_stats.host"));
         assert!(sql.contains("ILIKE '%lemmy%'"));
         assert!(sql.contains("/video-channels/"));
         assert!(sql.contains("/wp-json/activitypub/"));

@@ -143,9 +143,10 @@ impl<'a> RichannaSignature<'a> {
     ) -> Result<Self, crate::SignError<E>> {
         use std::io::Write;
 
-        if !headers.contains_key(http::header::DATE) {
-            panic!("legacy signatures must contain Date header");
-        }
+        assert!(
+            headers.contains_key(http::header::DATE),
+            "legacy signatures must contain Date header"
+        );
 
         let mut body = Vec::new();
 
@@ -361,12 +362,10 @@ impl<'a> RichannaSignature<'a> {
                     }
                 }
             }
+        } else if let Some(created) = self.created {
+            write!(body, "(created): {}", created)?;
         } else {
-            if let Some(created) = self.created {
-                write!(body, "(created): {}", created)?;
-            } else {
-                return Ok(false);
-            }
+            return Ok(false);
         }
 
         verify(&body, &self.signature).map_err(crate::VerifyError::User)

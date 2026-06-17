@@ -391,6 +391,13 @@ pub struct RespCommunityVisibilitySuppression {
 }
 
 #[derive(Serialize, Clone)]
+pub struct RespCommunityDiscoveryInfo<'a> {
+    pub host: Option<Cow<'a, str>>,
+    pub last_seen: Option<String>,
+    pub server_last_success: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
 pub struct RespCommunityInfo<'a> {
     #[serde(flatten)]
     pub base: RespMinimalCommunityInfo<'a>,
@@ -407,6 +414,9 @@ pub struct RespCommunityInfo<'a> {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_post_count: Option<i64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<RespCommunityDiscoveryInfo<'a>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_unfollow_status: Option<RespFederationStatus>,

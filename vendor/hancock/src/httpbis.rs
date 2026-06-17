@@ -22,7 +22,7 @@ pub struct HttpFieldComponentId<'a> {
     pub tr: bool,
 }
 
-impl<'a> HttpFieldComponentId<'a> {
+impl HttpFieldComponentId<'_> {
     pub fn new(name: http::HeaderName) -> Self {
         Self {
             name,
@@ -148,14 +148,18 @@ impl<'a> ComponentId<'a> {
                 RequestOrResponseRef::Request(req) => {
                     result.push_str(req.method().as_str());
                 }
-                _ => return Err(crate::CommonError::MissingComponent),
+                RequestOrResponseRef::Response(_) => {
+                    return Err(crate::CommonError::MissingComponent);
+                }
             },
             ComponentId::TargetUri => match src {
                 RequestOrResponseRef::Request(req) => {
                     use std::fmt::Write;
                     write!(result, "{}", req.uri()).unwrap();
                 }
-                _ => return Err(crate::CommonError::MissingComponent),
+                RequestOrResponseRef::Response(_) => {
+                    return Err(crate::CommonError::MissingComponent);
+                }
             },
             ComponentId::Authority => match src {
                 RequestOrResponseRef::Request(req) => {
@@ -165,7 +169,9 @@ impl<'a> ComponentId<'a> {
                         return Err(crate::CommonError::MissingComponent);
                     }
                 }
-                _ => return Err(crate::CommonError::MissingComponent),
+                RequestOrResponseRef::Response(_) => {
+                    return Err(crate::CommonError::MissingComponent);
+                }
             },
             ComponentId::Scheme => match src {
                 RequestOrResponseRef::Request(req) => {
@@ -175,7 +181,9 @@ impl<'a> ComponentId<'a> {
                         return Err(crate::CommonError::MissingComponent);
                     }
                 }
-                _ => return Err(crate::CommonError::MissingComponent),
+                RequestOrResponseRef::Response(_) => {
+                    return Err(crate::CommonError::MissingComponent);
+                }
             },
             ComponentId::RequestTarget => match src {
                 RequestOrResponseRef::Request(req) => {
@@ -185,20 +193,26 @@ impl<'a> ComponentId<'a> {
                         return Err(crate::CommonError::MissingComponent);
                     }
                 }
-                _ => return Err(crate::CommonError::MissingComponent),
+                RequestOrResponseRef::Response(_) => {
+                    return Err(crate::CommonError::MissingComponent);
+                }
             },
             ComponentId::Path => match src {
                 RequestOrResponseRef::Request(req) => {
                     result.push_str(req.uri().path());
                 }
-                _ => return Err(crate::CommonError::MissingComponent),
+                RequestOrResponseRef::Response(_) => {
+                    return Err(crate::CommonError::MissingComponent);
+                }
             },
             ComponentId::Query => match src {
                 RequestOrResponseRef::Request(req) => {
                     result.push('?');
                     result.push_str(req.uri().query().unwrap_or(""));
                 }
-                _ => return Err(crate::CommonError::MissingComponent),
+                RequestOrResponseRef::Response(_) => {
+                    return Err(crate::CommonError::MissingComponent);
+                }
             },
             ComponentId::QueryParam { .. } => {
                 return Err(crate::CommonError::Unsupported);
@@ -207,7 +221,9 @@ impl<'a> ComponentId<'a> {
                 RequestOrResponseRef::Response(res) => {
                     result.push_str(res.status().as_str());
                 }
-                _ => return Err(crate::CommonError::MissingComponent),
+                RequestOrResponseRef::Request(_) => {
+                    return Err(crate::CommonError::MissingComponent);
+                }
             },
         }
 
@@ -233,7 +249,7 @@ impl<'a> ComponentId<'a> {
             _ => return Err(crate::ParseError::InvalidStructure),
         };
 
-        if name.starts_with("@") {
+        if name.starts_with('@') {
             match name.as_ref() {
                 "@method" => simple(Self::Method),
                 "@target-uri" => simple(Self::TargetUri),
@@ -314,7 +330,7 @@ pub struct SignatureParams<'a> {
     pub tag: Option<Cow<'a, str>>,
 }
 
-impl<'a> SignatureParams<'a> {
+impl SignatureParams<'_> {
     pub fn new_now(lifetime_secs: u64) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -488,10 +504,10 @@ impl<'a> HttpbisSignature<'a> {
                             params_src.push('=');
                             match value {
                                 sfv::BareItem::Integer(value) => {
-                                    value.serialize_as_bare_item(&mut params_src)?
+                                    value.serialize_as_bare_item(&mut params_src)?;
                                 }
                                 sfv::BareItem::String(ref value) => {
-                                    value.as_str().serialize_as_bare_item(&mut params_src)?
+                                    value.as_str().serialize_as_bare_item(&mut params_src)?;
                                 }
                                 _ => {
                                     // all supported parameters use those types so others are
@@ -659,7 +675,7 @@ enum RequestOrResponseRef<'a, B> {
     Response(&'a http::Response<B>),
 }
 
-impl<'a, B> RequestOrResponseRef<'a, B> {
+impl<B> RequestOrResponseRef<'_, B> {
     pub fn headers(&self) -> &http::HeaderMap<http::HeaderValue> {
         match self {
             RequestOrResponseRef::Request(req) => req.headers(),
@@ -739,7 +755,7 @@ impl AsBareItem for &[u8] {
     }
 }
 
-impl<'a> AsBareItem for &Cow<'a, str> {
+impl AsBareItem for &Cow<'_, str> {
     fn serialize_as_bare_item(&self, result: &mut String) -> Result<(), crate::CommonError> {
         let value: &str = (*self).as_ref();
         value.serialize_as_bare_item(result)
@@ -918,7 +934,7 @@ mod test {
         assert_eq!(sigs.len(), 1);
 
         let sig = sigs.first().unwrap();
-        let result = sig.verify_request(&req, |content, sig| {
+        let result = sig.verify_request(&req, |content, _sig| {
             assert_eq!(content, br#""@signature-params": ();created=1618884473;keyid="test-key-rsa-pss";nonce="b3k2pp5k7z-50gnwp.yemd""#);
             Result::<_, std::convert::Infallible>::Ok(true)
         }).unwrap();
@@ -968,7 +984,7 @@ mod test {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            r#"test_create_minimal=::"#
+            r"test_create_minimal=::"
         );
     }
 }

@@ -188,19 +188,18 @@ impl SortType {
                         let u = spl.next().ok_or(InvalidPage)?;
                         if spl.next().is_some() {
                             return Err(InvalidPage);
-                        } else {
-                            use chrono::TimeZone;
-
-                            let sticky: Option<bool> = sticky
-                                .map(|x| x.parse().map_err(|_| InvalidPage))
-                                .transpose()?;
-                            let ts: i64 = ts.parse().map_err(|_| InvalidPage)?;
-                            let u: i64 = u.parse().map_err(|_| InvalidPage)?;
-
-                            let ts = chrono::offset::Utc.timestamp_nanos(ts);
-
-                            (sticky, ts.into(), u)
                         }
+                        use chrono::TimeZone;
+
+                        let sticky: Option<bool> = sticky
+                            .map(|x| x.parse().map_err(|_| InvalidPage))
+                            .transpose()?;
+                        let ts: i64 = ts.parse().map_err(|_| InvalidPage)?;
+                        let u: i64 = u.parse().map_err(|_| InvalidPage)?;
+
+                        let ts = chrono::offset::Utc.timestamp_nanos(ts);
+
+                        (sticky, ts.into(), u)
                     };
 
                     let idx1 = value_out.push(page.1);
@@ -362,7 +361,6 @@ impl CommunitiesSortType {
         _current_page: Option<&str>,
     ) -> String {
         match self {
-            Self::OldLocal => format_number_58(community.id.raw()),
             Self::Alphabetic => {
                 let mut result = bs58::encode(community.name.as_bytes()).into_string();
 
@@ -375,7 +373,9 @@ impl CommunitiesSortType {
 
                 result
             }
-            Self::LastPost | Self::PostCount | Self::Host => format_number_58(community.id.raw()),
+            Self::OldLocal | Self::LastPost | Self::PostCount | Self::Host => {
+                format_number_58(community.id.raw())
+            }
         }
     }
 }
@@ -767,10 +767,13 @@ fn activitypub_alternate_url_from_html_node(
 fn activitypub_alternate_url_from_html(base_url: &url::Url, html: &str) -> Option<url::Url> {
     use html5ever::tendril::TendrilSink;
 
-    let dom = html5ever::parse_document(markup5ever_rcdom::RcDom::default(), Default::default())
-        .from_utf8()
-        .read_from(&mut html.as_bytes())
-        .ok()?;
+    let dom = html5ever::parse_document(
+        markup5ever_rcdom::RcDom::default(),
+        html5ever::ParseOpts::default(),
+    )
+    .from_utf8()
+    .read_from(&mut html.as_bytes())
+    .ok()?;
 
     activitypub_alternate_url_from_html_node(&dom.document, base_url)
 }
@@ -795,7 +798,7 @@ async fn fetch_activitypub_alternate_for_lookup(
                 hyper::header::ACCEPT,
                 "text/html, application/xhtml+xml;q=0.9",
             )
-            .body(Default::default())?;
+            .body(hyper::Body::default())?;
         let res = crate::apub_util::send_http_request(&ctx.http_client, req).await?;
 
         if res.status().is_redirection() {
@@ -1134,6 +1137,10 @@ async fn route_unstable_instance_get(
                 cleanup_notifications_enabled, cleanup_notification_retention_days, \
                 cleanup_failed_inbox_task_payloads_enabled, \
                 cleanup_failed_inbox_task_payload_retention_days, \
+                cleanup_completed_task_retention_days, \
+                cleanup_failed_task_retention_days, \
+                cleanup_failed_inbox_task_payload_compaction_hours, \
+                discovery_enqueue_limit, discovery_refresh_interval_hours, \
                 site_logo, site_css \
             FROM site WHERE local = TRUE",
             &[],
@@ -1158,17 +1165,22 @@ async fn route_unstable_instance_get(
     let cleanup_notification_retention_days: i32 = row.get(16);
     let cleanup_failed_inbox_task_payloads_enabled: bool = row.get(17);
     let cleanup_failed_inbox_task_payload_retention_days: i32 = row.get(18);
-    let site_logo: Option<&str> = row.get(19);
+    let cleanup_completed_task_retention_days: i32 = row.get(19);
+    let cleanup_failed_task_retention_days: i32 = row.get(20);
+    let cleanup_failed_inbox_task_payload_compaction_hours: i32 = row.get(21);
+    let discovery_enqueue_limit: i32 = row.get(22);
+    let discovery_refresh_interval_hours: i32 = row.get(23);
+    let site_logo: Option<&str> = row.get(24);
     let site_logo = site_logo.map(|href| RespAvatarInfo {
         url: ctx.process_site_logo_href(href).into_owned().into(),
     });
-    let site_css: Option<&str> = row.get(20);
+    let site_css: Option<&str> = row.get(25);
     let site_css = site_css.map(|href| RespAvatarInfo {
         url: ctx.process_site_css_href(href).into_owned().into(),
     });
 
     let body = serde_json::json!({
-        "web_push_vapid_key": ctx.vapid_public_key_base64,
+        "web_push_vapid_key": "",
         "description": crate::types::Content {
             content_text: description_text.map(Cow::Borrowed),
             content_markdown: description_markdown.map(Cow::Borrowed),
@@ -1200,6 +1212,11 @@ async fn route_unstable_instance_get(
         "cleanup_notification_retention_days": cleanup_notification_retention_days,
         "cleanup_failed_inbox_task_payloads_enabled": cleanup_failed_inbox_task_payloads_enabled,
         "cleanup_failed_inbox_task_payload_retention_days": cleanup_failed_inbox_task_payload_retention_days,
+        "cleanup_completed_task_retention_days": cleanup_completed_task_retention_days,
+        "cleanup_failed_task_retention_days": cleanup_failed_task_retention_days,
+        "cleanup_failed_inbox_task_payload_compaction_hours": cleanup_failed_inbox_task_payload_compaction_hours,
+        "discovery_enqueue_limit": discovery_enqueue_limit,
+        "discovery_refresh_interval_hours": discovery_refresh_interval_hours,
     });
 
     crate::json_response(&body)
@@ -1360,6 +1377,11 @@ async fn route_unstable_instance_patch(
         cleanup_notification_retention_days: Option<i32>,
         cleanup_failed_inbox_task_payloads_enabled: Option<bool>,
         cleanup_failed_inbox_task_payload_retention_days: Option<i32>,
+        cleanup_completed_task_retention_days: Option<i32>,
+        cleanup_failed_task_retention_days: Option<i32>,
+        cleanup_failed_inbox_task_payload_compaction_hours: Option<i32>,
+        discovery_enqueue_limit: Option<i32>,
+        discovery_refresh_interval_hours: Option<i32>,
         #[serde(default, with = "::serde_with::rust::double_option")]
         community_creation_requirement: Option<Option<Cow<'a, str>>>,
         #[serde(default, with = "::serde_with::rust::double_option")]
@@ -1587,7 +1609,7 @@ async fn route_unstable_instance_patch(
             if !(1..=365).contains(retention_days) {
                 return Err(crate::Error::UserError(crate::simple_response(
                     hyper::StatusCode::BAD_REQUEST,
-                    "Failed inbox payload retention must be between 1 and 365 days",
+                    "Failed inbox task retention must be between 1 and 365 days",
                 )));
             }
 
@@ -1595,6 +1617,64 @@ async fn route_unstable_instance_patch(
                 "cleanup_failed_inbox_task_payload_retention_days",
                 retention_days,
             ));
+        }
+
+        if let Some(retention_days) = &body.cleanup_completed_task_retention_days {
+            if !(1..=30).contains(retention_days) {
+                return Err(crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::BAD_REQUEST,
+                    "Completed task retention must be between 1 and 30 days",
+                )));
+            }
+
+            changes.push(("cleanup_completed_task_retention_days", retention_days));
+        }
+
+        if let Some(retention_days) = &body.cleanup_failed_task_retention_days {
+            if !(1..=365).contains(retention_days) {
+                return Err(crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::BAD_REQUEST,
+                    "Failed task retention must be between 1 and 365 days",
+                )));
+            }
+
+            changes.push(("cleanup_failed_task_retention_days", retention_days));
+        }
+
+        if let Some(retention_hours) = &body.cleanup_failed_inbox_task_payload_compaction_hours {
+            if !(1..=168).contains(retention_hours) {
+                return Err(crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::BAD_REQUEST,
+                    "Failed inbox payload compaction must be between 1 and 168 hours",
+                )));
+            }
+
+            changes.push((
+                "cleanup_failed_inbox_task_payload_compaction_hours",
+                retention_hours,
+            ));
+        }
+
+        if let Some(discovery_enqueue_limit) = &body.discovery_enqueue_limit {
+            if !(10..=500).contains(discovery_enqueue_limit) {
+                return Err(crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::BAD_REQUEST,
+                    "Discovery batch size must be between 10 and 500 hosts",
+                )));
+            }
+
+            changes.push(("discovery_enqueue_limit", discovery_enqueue_limit));
+        }
+
+        if let Some(refresh_hours) = &body.discovery_refresh_interval_hours {
+            if !(1..=168).contains(refresh_hours) {
+                return Err(crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::BAD_REQUEST,
+                    "Discovery refresh interval must be between 1 and 168 hours",
+                )));
+            }
+
+            changes.push(("discovery_refresh_interval_hours", refresh_hours));
         }
 
         if !changes.is_empty() {
@@ -1646,7 +1726,88 @@ SELECT \
     (SELECT COUNT(*) FROM blocked_ap_id), \
     (SELECT COUNT(*) FROM community_server_visibility_suppression), \
     (SELECT COUNT(*) FROM community_user_visibility_suppression), \
-    (SELECT COUNT(*) FROM federation_event)";
+    (SELECT COUNT(*) FROM federation_event), \
+    (SELECT COUNT(*) \
+        FROM community_discovery \
+        INNER JOIN community_discovery_server \
+            ON community_discovery_server.host=community_discovery.host \
+        WHERE community_discovery.active \
+        AND community_discovery.remote_post_count >= 2 \
+        AND community_discovery_server.active \
+        AND community_discovery_server.suppressed_reason IS NULL \
+        AND community_discovery_server.last_success IS NOT NULL), \
+    (SELECT COUNT(*) \
+        FROM community_discovery_server \
+        WHERE community_discovery_server.active \
+        AND community_discovery_server.suppressed_reason IS NULL \
+        AND community_discovery_server.last_success IS NOT NULL \
+        AND EXISTS (\
+            SELECT 1 \
+            FROM community_discovery \
+            WHERE community_discovery.host=community_discovery_server.host \
+            AND community_discovery.active \
+            AND community_discovery.remote_post_count >= 2\
+        )), \
+    (SELECT COUNT(*) \
+        FROM community_discovery_server \
+        WHERE community_discovery_server.suppressed_reason IS NULL \
+        AND NOT EXISTS (\
+            SELECT 1 \
+            FROM community_discovery \
+            WHERE community_discovery.host=community_discovery_server.host \
+            AND community_discovery.active \
+            AND community_discovery.remote_post_count >= 2\
+        )), \
+    (WITH settings AS (\
+        SELECT discovery_refresh_interval_hours AS refresh_hours \
+        FROM site WHERE local\
+    ) \
+    SELECT COUNT(*) \
+    FROM community_discovery_server, settings \
+    WHERE community_discovery_server.suppressed_reason IS NULL \
+    AND (\
+        (active AND failed_checks=0 \
+            AND (last_checked IS NULL OR last_checked < current_timestamp - make_interval(hours => settings.refresh_hours::INTEGER))) \
+        OR (active AND failed_checks=1 \
+            AND (last_checked IS NULL OR last_checked < current_timestamp - make_interval(hours => (settings.refresh_hours * 2)::INTEGER))) \
+        OR (active AND failed_checks>=2 \
+            AND (last_checked IS NULL OR last_checked < current_timestamp - make_interval(hours => (settings.refresh_hours * 4)::INTEGER))) \
+        OR (NOT active \
+            AND (last_checked IS NULL OR last_checked < current_timestamp - make_interval(hours => (settings.refresh_hours * 4)::INTEGER)))\
+    )), \
+    (SELECT COUNT(*) FROM task WHERE state='pending'), \
+    (SELECT COUNT(*) FROM task WHERE state='running'), \
+    (SELECT COUNT(*) FROM task WHERE state='failed'), \
+    (SELECT COUNT(*) FROM task WHERE state='completed'), \
+    (SELECT min(created_at)::TEXT FROM task WHERE state='pending'), \
+    (SELECT pg_total_relation_size('task'::REGCLASS)::BIGINT), \
+    (SELECT COUNT(*) FROM task \
+        WHERE state='pending' \
+        AND kind IN ('deliver_to_audience', 'deliver_to_inbox')), \
+    (SELECT COUNT(*) FROM task \
+        WHERE state='pending' \
+        AND kind IN ('ingest_object_from_inbox', 'verify_and_ingest_object_from_inbox')), \
+    (SELECT COUNT(*) FROM task \
+        WHERE state='pending' \
+        AND kind IN (\
+            'seed_community_discovery_hosts', \
+            'seed_discourse_discovery_hosts', \
+            'discover_server_communities', \
+            'probe_community_host_interaction'\
+        )), \
+    (SELECT COUNT(*) FROM task \
+        WHERE state='pending' \
+        AND (\
+            kind='fetch_collection_target_preview' \
+            OR (kind='fetch_community_outbox' AND params->>'preview'='true')\
+        )), \
+    (SELECT COUNT(*) FROM task \
+        WHERE state='pending' \
+        AND kind IN (\
+            'fetch_post_replies', \
+            'fetch_platform_post_thread', \
+            'fetch_remote_post_refresh'\
+        ))";
 
 const ADMIN_FEDERATION_SUPPRESSED_SERVERS_SQL: &str = "\
 SELECT host, software, active, last_checked::TEXT, last_success::TEXT, failed_checks, \
@@ -1693,12 +1854,25 @@ SELECT server.host, server.software, server.active, server.last_checked::TEXT, \
     COALESCE(profile_stats.actor_profiles_total, 0), \
     COALESCE(profile_stats.high_confidence_actor_profiles_total, 0), \
     COALESCE(event_stats.recent_events_total, 0), \
-    COALESCE(event_stats.recent_failures_total, 0) \
+    COALESCE(event_stats.recent_failures_total, 0), \
+    discovery.newest_community_seen::TEXT, \
+    CASE \
+        WHEN server.suppressed_reason IS NOT NULL THEN 'suppressed' \
+        WHEN NOT server.active THEN 'inactive' \
+        WHEN COALESCE(discovery.discovered_communities_with_posts, 0) > 0 \
+            AND discovery.newest_community_seen > current_timestamp - INTERVAL '36 HOURS' \
+            THEN 'useful_recent' \
+        WHEN COALESCE(discovery.discovered_communities_with_posts, 0) > 0 \
+            THEN 'useful_stale' \
+        WHEN server.last_success IS NOT NULL THEN 'verified_no_useful_catalog' \
+        ELSE 'known_only' \
+    END \
 FROM selected_server AS server \
 LEFT JOIN LATERAL (\
     SELECT COUNT(*) AS discovered_communities_total, \
         COUNT(*) FILTER (WHERE active) AS discovered_communities_active, \
-        COUNT(*) FILTER (WHERE active AND remote_post_count >= 2) AS discovered_communities_with_posts \
+        COUNT(*) FILTER (WHERE active AND remote_post_count >= 2) AS discovered_communities_with_posts, \
+        max(last_seen) FILTER (WHERE active AND remote_post_count >= 2) AS newest_community_seen \
     FROM community_discovery \
     WHERE community_discovery.host=server.host\
 ) AS discovery ON TRUE \
@@ -1734,6 +1908,68 @@ ORDER BY \
     COALESCE(event_stats.recent_failures_total, 0) DESC, \
     COALESCE(community_stats.followed_communities_total, 0) DESC, \
     server.host";
+
+const ADMIN_FEDERATION_FOLLOWED_COMMUNITY_HEALTH_SQL: &str = "\
+WITH followed_community AS (\
+    SELECT community.id, community.name, community.ap_id, \
+        lower(regexp_replace(substring(community.ap_id from '^https?://([^/]+)'), '^www\\.', '')) AS host, \
+        COUNT(DISTINCT community_follow.follower) AS local_followers, \
+        COUNT(post.id) FILTER (\
+            WHERE NOT post.deleted \
+            AND post.approved\
+        ) AS visible_posts, \
+        max(post.created) FILTER (\
+            WHERE NOT post.deleted \
+            AND post.approved\
+        ) AS last_post_at \
+    FROM community \
+    INNER JOIN community_follow \
+        ON community_follow.community=community.id \
+        AND community_follow.local \
+        AND community_follow.accepted \
+    LEFT JOIN post ON post.community=community.id \
+    WHERE NOT community.local \
+    AND NOT community.deleted \
+    AND community.ap_id IS NOT NULL \
+    GROUP BY community.id\
+) \
+SELECT followed_community.id, followed_community.name, followed_community.ap_id, \
+    followed_community.host, server.software, server.active, server.failed_checks, \
+    server.latest_error, server.suppressed_reason, server.last_success::TEXT, \
+    followed_community.local_followers, followed_community.visible_posts, \
+    followed_community.last_post_at::TEXT, \
+    COALESCE(discovery.remote_post_count, 0), discovery.last_seen::TEXT, \
+    CASE \
+        WHEN server.host IS NULL THEN 'missing_host_profile' \
+        WHEN server.suppressed_reason IS NOT NULL THEN 'suppressed_host' \
+        WHEN NOT server.active THEN 'inactive_host' \
+        WHEN followed_community.visible_posts = 0 THEN 'no_visible_posts' \
+        WHEN followed_community.last_post_at < current_timestamp - INTERVAL '90 DAYS' THEN 'stale_90d' \
+        WHEN followed_community.last_post_at < current_timestamp - INTERVAL '30 DAYS' THEN 'stale_30d' \
+        WHEN discovery.last_seen IS NOT NULL \
+            AND discovery.last_seen < current_timestamp - INTERVAL '2 DAYS' THEN 'catalog_stale' \
+        ELSE 'ok' \
+    END AS health_status \
+FROM followed_community \
+LEFT JOIN community_discovery_server AS server \
+    ON server.host=followed_community.host \
+LEFT JOIN community_discovery AS discovery \
+    ON discovery.community=followed_community.id \
+ORDER BY \
+    CASE \
+        WHEN server.host IS NULL THEN 0 \
+        WHEN server.suppressed_reason IS NOT NULL THEN 1 \
+        WHEN NOT server.active THEN 2 \
+        WHEN followed_community.visible_posts = 0 THEN 3 \
+        WHEN followed_community.last_post_at < current_timestamp - INTERVAL '90 DAYS' THEN 4 \
+        WHEN followed_community.last_post_at < current_timestamp - INTERVAL '30 DAYS' THEN 5 \
+        WHEN discovery.last_seen IS NOT NULL \
+            AND discovery.last_seen < current_timestamp - INTERVAL '2 DAYS' THEN 6 \
+        ELSE 7 \
+    END, \
+    COALESCE(followed_community.last_post_at, 'epoch'::TIMESTAMPTZ), \
+    followed_community.host, followed_community.name \
+LIMIT $1";
 
 const ADMIN_FEDERATION_BLOCKED_AP_IDS_SQL: &str = "\
 SELECT ap_id \
@@ -1799,6 +2035,88 @@ AND state='failed' \
 AND COALESCE(params->>'discarded', 'false') <> 'true' \
 RETURNING id";
 
+fn admin_failure_category(
+    latest_error: Option<&str>,
+    suppressed_reason: Option<&str>,
+    probe_error: Option<&str>,
+) -> Option<&'static str> {
+    let mut text = String::new();
+
+    for value in [latest_error, suppressed_reason, probe_error]
+        .into_iter()
+        .flatten()
+    {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(value);
+    }
+
+    let text = text.trim();
+    if text.is_empty() {
+        return suppressed_reason.map(|_| "suppressed");
+    }
+
+    let lower = text.to_ascii_lowercase();
+
+    if lower.contains("domain_banned")
+        || lower.contains("domain_blocked")
+        || (lower.contains("domain") && lower.contains("blocked"))
+    {
+        Some("domain_block")
+    } else if lower.contains("user_banned")
+        || lower.contains("community_banned")
+        || lower.contains("banned from")
+    {
+        Some("user_or_community_ban")
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        Some("timeout")
+    } else if lower.contains("dns")
+        || lower.contains("failed to resolve")
+        || lower.contains("failed to lookup")
+    {
+        Some("dns")
+    } else if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
+        Some("tls")
+    } else if lower.contains("anubis")
+        || lower.contains("just a moment")
+        || lower.contains("cloudflare")
+        || lower.contains("oh noes")
+    {
+        Some("bot_challenge")
+    } else if lower.contains("instance_is_private") || lower.contains("instance is private") {
+        Some("private")
+    } else if lower.contains("no eligible remote post") {
+        Some("no_probe_target")
+    } else if lower.contains("unknown content type")
+        || lower.contains("unsupported activitypub")
+        || lower.contains("not activitypub")
+    {
+        Some("unsupported_activitypub")
+    } else if lower.contains("route not found")
+        || lower.contains("not found")
+        || lower.contains("404")
+    {
+        Some("not_found")
+    } else if lower.contains("502 bad gateway")
+        || lower.contains("503 service unavailable")
+        || lower.contains("504 gateway timeout")
+    {
+        Some("remote_5xx")
+    } else if lower.contains("connection refused") || lower.contains("no route to host") {
+        Some("connection")
+    } else if lower.contains("eof while parsing")
+        || lower.contains("incomplete json")
+        || lower.contains("unknown error")
+    {
+        Some("bad_remote_response")
+    } else if suppressed_reason.is_some() {
+        Some("suppressed")
+    } else {
+        Some("other")
+    }
+}
+
 async fn route_unstable_instance_federation_get(
     (): (),
     ctx: Arc<crate::RouteContext>,
@@ -1827,6 +2145,12 @@ async fn route_unstable_instance_federation_get(
         .await?;
     let host_profiles = db
         .query(ADMIN_FEDERATION_HOST_PROFILES_SQL, &[&short_list_limit])
+        .await?;
+    let followed_community_health = db
+        .query(
+            ADMIN_FEDERATION_FOLLOWED_COMMUNITY_HEALTH_SQL,
+            &[&short_list_limit],
+        )
         .await?;
     let blocked_ap_ids = db
         .query(ADMIN_FEDERATION_BLOCKED_AP_IDS_SQL, &[&short_list_limit])
@@ -1871,8 +2195,27 @@ async fn route_unstable_instance_federation_get(
             "server_suppressed_communities_total": summary.get::<_, i64>(10),
             "user_suppressed_communities_total": summary.get::<_, i64>(11),
             "federation_events_total": summary.get::<_, i64>(12),
+            "discovered_communities_visible": summary.get::<_, i64>(13),
+            "discovery_servers_useful_sources": summary.get::<_, i64>(14),
+            "discovery_servers_known_only": summary.get::<_, i64>(15),
+            "discovery_servers_due": summary.get::<_, i64>(16),
+            "task_pending_total": summary.get::<_, i64>(17),
+            "task_running_total": summary.get::<_, i64>(18),
+            "task_failed_total": summary.get::<_, i64>(19),
+            "task_completed_total": summary.get::<_, i64>(20),
+            "task_oldest_pending": summary.get::<_, Option<&str>>(21),
+            "task_table_bytes": summary.get::<_, i64>(22),
+            "task_pending_outbound": summary.get::<_, i64>(23),
+            "task_pending_inbox": summary.get::<_, i64>(24),
+            "task_pending_discovery": summary.get::<_, i64>(25),
+            "task_pending_preview": summary.get::<_, i64>(26),
+            "task_pending_readback": summary.get::<_, i64>(27),
         },
         "suppressed_servers": suppressed_servers.iter().map(|row| {
+            let latest_error = row.get::<_, Option<&str>>(6);
+            let suppressed_reason = row.get::<_, Option<&str>>(7);
+            let probe_error = row.get::<_, Option<&str>>(11);
+
             serde_json::json!({
                 "host": row.get::<_, &str>(0),
                 "software": row.get::<_, Option<&str>>(1),
@@ -1880,15 +2223,24 @@ async fn route_unstable_instance_federation_get(
                 "last_checked": row.get::<_, Option<&str>>(3),
                 "last_success": row.get::<_, Option<&str>>(4),
                 "failed_checks": row.get::<_, i32>(5),
-                "latest_error": row.get::<_, Option<&str>>(6),
-                "suppressed_reason": row.get::<_, Option<&str>>(7),
+                "latest_error": latest_error,
+                "suppressed_reason": suppressed_reason,
                 "suppressed_at": row.get::<_, Option<&str>>(8),
                 "interaction_probe_checked_at": row.get::<_, Option<&str>>(9),
                 "interaction_probe_success_at": row.get::<_, Option<&str>>(10),
-                "interaction_probe_latest_error": row.get::<_, Option<&str>>(11),
+                "interaction_probe_latest_error": probe_error,
+                "failure_category": admin_failure_category(
+                    latest_error,
+                    suppressed_reason,
+                    probe_error,
+                ),
             })
         }).collect::<Vec<_>>(),
         "failing_servers": failing_servers.iter().map(|row| {
+            let latest_error = row.get::<_, Option<&str>>(6);
+            let suppressed_reason = row.get::<_, Option<&str>>(7);
+            let probe_error = row.get::<_, Option<&str>>(11);
+
             serde_json::json!({
                 "host": row.get::<_, &str>(0),
                 "software": row.get::<_, Option<&str>>(1),
@@ -1896,37 +2248,80 @@ async fn route_unstable_instance_federation_get(
                 "last_checked": row.get::<_, Option<&str>>(3),
                 "last_success": row.get::<_, Option<&str>>(4),
                 "failed_checks": row.get::<_, i32>(5),
-                "latest_error": row.get::<_, Option<&str>>(6),
-                "suppressed_reason": row.get::<_, Option<&str>>(7),
+                "latest_error": latest_error,
+                "suppressed_reason": suppressed_reason,
                 "suppressed_at": row.get::<_, Option<&str>>(8),
                 "interaction_probe_checked_at": row.get::<_, Option<&str>>(9),
                 "interaction_probe_success_at": row.get::<_, Option<&str>>(10),
-                "interaction_probe_latest_error": row.get::<_, Option<&str>>(11),
+                "interaction_probe_latest_error": probe_error,
+                "failure_category": admin_failure_category(
+                    latest_error,
+                    suppressed_reason,
+                    probe_error,
+                ),
             })
         }).collect::<Vec<_>>(),
         "host_profiles": host_profiles.iter().map(|row| {
+            let latest_error = row.get::<_, Option<&str>>(6);
+            let suppressed_reason = row.get::<_, Option<&str>>(7);
+            let probe_error = row.get::<_, Option<&str>>(11);
+            let active = row.get::<_, bool>(2);
+            let last_success = row.get::<_, Option<&str>>(4);
+            let discovered_with_posts = row.get::<_, i64>(14);
+
             serde_json::json!({
                 "host": row.get::<_, &str>(0),
                 "software": row.get::<_, Option<&str>>(1),
-                "active": row.get::<_, bool>(2),
+                "active": active,
                 "last_checked": row.get::<_, Option<&str>>(3),
-                "last_success": row.get::<_, Option<&str>>(4),
+                "last_success": last_success,
                 "failed_checks": row.get::<_, i32>(5),
-                "latest_error": row.get::<_, Option<&str>>(6),
-                "suppressed_reason": row.get::<_, Option<&str>>(7),
+                "latest_error": latest_error,
+                "suppressed_reason": suppressed_reason,
                 "suppressed_at": row.get::<_, Option<&str>>(8),
                 "interaction_probe_checked_at": row.get::<_, Option<&str>>(9),
                 "interaction_probe_success_at": row.get::<_, Option<&str>>(10),
-                "interaction_probe_latest_error": row.get::<_, Option<&str>>(11),
+                "interaction_probe_latest_error": probe_error,
+                "failure_category": admin_failure_category(
+                    latest_error,
+                    suppressed_reason,
+                    probe_error,
+                ),
                 "discovered_communities_total": row.get::<_, i64>(12),
                 "discovered_communities_active": row.get::<_, i64>(13),
-                "discovered_communities_with_posts": row.get::<_, i64>(14),
+                "discovered_communities_with_posts": discovered_with_posts,
+                "useful_community_source": active
+                    && suppressed_reason.is_none()
+                    && last_success.is_some()
+                    && discovered_with_posts > 0,
                 "communities_total": row.get::<_, i64>(15),
                 "followed_communities_total": row.get::<_, i64>(16),
                 "actor_profiles_total": row.get::<_, i64>(17),
                 "high_confidence_actor_profiles_total": row.get::<_, i64>(18),
                 "recent_events_total": row.get::<_, i64>(19),
                 "recent_failures_total": row.get::<_, i64>(20),
+                "newest_community_seen": row.get::<_, Option<&str>>(21),
+                "catalog_status": row.get::<_, &str>(22),
+            })
+        }).collect::<Vec<_>>(),
+        "followed_community_health": followed_community_health.iter().map(|row| {
+            serde_json::json!({
+                "community_id": CommunityLocalID(row.get(0)),
+                "community_name": row.get::<_, &str>(1),
+                "community_ap_id": row.get::<_, Option<&str>>(2),
+                "host": row.get::<_, &str>(3),
+                "software": row.get::<_, Option<&str>>(4),
+                "host_active": row.get::<_, Option<bool>>(5),
+                "host_failed_checks": row.get::<_, Option<i32>>(6),
+                "latest_error": row.get::<_, Option<&str>>(7),
+                "suppressed_reason": row.get::<_, Option<&str>>(8),
+                "last_success": row.get::<_, Option<&str>>(9),
+                "local_followers": row.get::<_, i64>(10),
+                "visible_posts": row.get::<_, i64>(11),
+                "last_post": row.get::<_, Option<&str>>(12),
+                "remote_post_count": row.get::<_, i64>(13),
+                "catalog_last_seen": row.get::<_, Option<&str>>(14),
+                "health_status": row.get::<_, &str>(15),
             })
         }).collect::<Vec<_>>(),
         "blocked_ap_ids": blocked_ap_ids.iter().map(|row| {
@@ -2672,8 +3067,9 @@ async fn get_comments_replies<'a>(
                         sensitive,
                     },
 
-                    attachments: match ctx
-                        .process_attachments_inner(row.get::<_, Option<_>>(11).map(Cow::Owned), id)
+                    attachments: match row
+                        .get::<_, Option<_>>(11)
+                        .map(|href| ctx.process_attachment_href(Cow::Owned(href), id))
                     {
                         None => vec![],
                         Some(href) => vec![JustURL { url: href }],
@@ -3265,7 +3661,7 @@ mod tests {
                 assert_eq!(user, expected_user);
                 assert_eq!(host, expected_host);
             }
-            other => panic!("expected WebFinger lookup, got {:?}", other),
+            other @ super::Lookup::Url(_) => panic!("expected WebFinger lookup, got {:?}", other),
         }
     }
 
@@ -3321,7 +3717,9 @@ mod tests {
     fn lookup_accepts_actor_urls() {
         match super::parse_lookup("https://kbin.earth/m/random").unwrap() {
             super::Lookup::Url(url) => assert_eq!(url.as_str(), "https://kbin.earth/m/random"),
-            other => panic!("expected URL lookup, got {:?}", other),
+            other @ super::Lookup::WebFinger { .. } => {
+                panic!("expected URL lookup, got {:?}", other)
+            }
         }
 
         match super::parse_lookup("spectra.video/c/fediforum_demos/videos").unwrap() {
@@ -3331,7 +3729,9 @@ mod tests {
                     "https://spectra.video/c/fediforum_demos/videos"
                 );
             }
-            other => panic!("expected URL lookup, got {:?}", other),
+            other @ super::Lookup::WebFinger { .. } => {
+                panic!("expected URL lookup, got {:?}", other)
+            }
         }
     }
 
@@ -3379,7 +3779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_stylesheet_upload_is_a_user_error() {
+    async fn stylesheet_uploads_report_oversized_bodies_as_413() {
         let body = vec![b'a'; super::SITE_STYLESHEET_MAX_BYTES + 1];
         let err = super::read_site_stylesheet_upload_body(hyper::Body::from(body))
             .await
@@ -3389,8 +3789,16 @@ mod tests {
             crate::Error::UserError(response) => {
                 assert_eq!(response.status(), hyper::StatusCode::PAYLOAD_TOO_LARGE);
             }
-            err => panic!("expected user error, got {:?}", err),
+            err => panic!("expected payload-too-large user error, got {:?}", err),
         }
+    }
+
+    #[tokio::test]
+    async fn stylesheet_uploads_accept_bodies_within_limit() {
+        let body = hyper::Body::from("body { color: red; }");
+        let stylesheet = super::read_site_stylesheet_upload_body(body).await.unwrap();
+
+        assert_eq!(&stylesheet[..], b"body { color: red; }");
     }
 
     #[test]
@@ -3498,6 +3906,18 @@ mod tests {
         assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("community_discovery"));
         assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("actor_target_profile"));
         assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("blocked_ap_id"));
+        assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("last_success IS NOT NULL"));
+        assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("make_interval(hours"));
+        assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("remote_post_count >= 2"));
+        assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("FROM task WHERE state='pending'"));
+        assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("pg_total_relation_size('task'"));
+        assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("'deliver_to_audience'"));
+        assert!(
+            super::ADMIN_FEDERATION_SUMMARY_SQL.contains("'verify_and_ingest_object_from_inbox'")
+        );
+        assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("'discover_server_communities'"));
+        assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("'fetch_collection_target_preview'"));
+        assert!(super::ADMIN_FEDERATION_SUMMARY_SQL.contains("'fetch_platform_post_thread'"));
         assert!(
             super::ADMIN_FEDERATION_SUMMARY_SQL.contains("community_server_visibility_suppression")
         );
@@ -3515,6 +3935,20 @@ mod tests {
         assert!(super::ADMIN_FEDERATION_HOST_PROFILES_SQL.contains("actor_target_profile"));
         assert!(super::ADMIN_FEDERATION_HOST_PROFILES_SQL.contains("federation_event"));
         assert!(super::ADMIN_FEDERATION_HOST_PROFILES_SQL.contains("recent_failures_total"));
+        assert!(super::ADMIN_FEDERATION_HOST_PROFILES_SQL.contains("newest_community_seen"));
+        assert!(super::ADMIN_FEDERATION_HOST_PROFILES_SQL.contains("useful_recent"));
+        assert!(super::ADMIN_FEDERATION_HOST_PROFILES_SQL.contains("verified_no_useful_catalog"));
+        assert!(super::ADMIN_FEDERATION_FOLLOWED_COMMUNITY_HEALTH_SQL.contains("community_follow"));
+        assert!(super::ADMIN_FEDERATION_FOLLOWED_COMMUNITY_HEALTH_SQL.contains("local_followers"));
+        assert!(super::ADMIN_FEDERATION_FOLLOWED_COMMUNITY_HEALTH_SQL.contains("last_post_at"));
+        assert!(
+            super::ADMIN_FEDERATION_FOLLOWED_COMMUNITY_HEALTH_SQL.contains("remote_post_count")
+        );
+        assert!(
+            super::ADMIN_FEDERATION_FOLLOWED_COMMUNITY_HEALTH_SQL.contains("missing_host_profile")
+        );
+        assert!(super::ADMIN_FEDERATION_FOLLOWED_COMMUNITY_HEALTH_SQL.contains("no_visible_posts"));
+        assert!(super::ADMIN_FEDERATION_FOLLOWED_COMMUNITY_HEALTH_SQL.contains("catalog_stale"));
         assert!(super::ADMIN_FEDERATION_ACTOR_PROFILE_FAMILIES_SQL.contains("confidence >= 80"));
         assert!(super::ADMIN_FEDERATION_REPLAYABLE_FAILED_TASKS_SQL.contains("state='failed'"));
         assert!(
@@ -3522,5 +3956,25 @@ mod tests {
         );
         assert!(super::ADMIN_FEDERATION_RETRY_FAILED_TASK_SQL.contains("SET state='pending'"));
         assert!(super::ADMIN_FEDERATION_RETRY_FAILED_TASK_SQL.contains("params->>'discarded'"));
+    }
+
+    #[test]
+    fn admin_failure_category_groups_common_remote_failures() {
+        assert_eq!(
+            super::admin_failure_category(Some("DNS lookup failed"), None, None),
+            Some("dns")
+        );
+        assert_eq!(
+            super::admin_failure_category(Some("Remote request timed out"), None, None),
+            Some("timeout")
+        );
+        assert_eq!(
+            super::admin_failure_category(Some("just a moment cloudflare"), None, None),
+            Some("bot_challenge")
+        );
+        assert_eq!(
+            super::admin_failure_category(None, Some("manual suppression"), None),
+            Some("suppressed")
+        );
     }
 }

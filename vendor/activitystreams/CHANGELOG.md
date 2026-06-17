@@ -15,6 +15,10 @@
 - Preserve direct language-map input through tolerant parsing while strict
   validation requires the standard `nameMap`, `summaryMap`, and `contentMap`
   forms.
+- Clean up the local fork under stricter Clippy coverage, including examples,
+  tests, primitive helpers, conformance checks, and internal conversion paths.
+- Clean up crate metadata and verify the vendored fork with rustdoc warnings
+  denied and the full doctest suite.
 
 # 0.7.0-alpha.19
 - Add `.as_str()`, `.language()` and `impl AsRef<str>` for `AnyString`

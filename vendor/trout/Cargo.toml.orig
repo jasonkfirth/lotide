@@ -6,6 +6,9 @@ edition = "2018"
 license = "MIT"
 description = "Tree-based routing library for HTTP and beyond"
 repository = "https://git.sr.ht/~vpzom/trout"
+readme = "README.md"
+keywords = ["routing", "http", "tree"]
+categories = ["web-programming"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

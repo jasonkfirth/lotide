@@ -1,10 +1,10 @@
-use crate::BaseURL;
 use crate::hyper;
 use crate::types::{
     ActorLocalRef, CollectionTargetLocalID, CommentLocalID, CommunityLocalID, FingerRequestQuery,
     FingerResponse, FlagLocalID, ImageHandling, PollLocalID, PollOptionLocalID, PostLocalID,
     ThingLocalRef, UserLocalID,
 };
+use crate::BaseURL;
 use activitystreams::prelude::*;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -362,7 +362,7 @@ pub async fn fetch_json_value(
     let request = hyper::Request::get(hyper::Uri::try_from(url.as_str())?)
         .header(hyper::header::USER_AGENT, &ctx.user_agent)
         .header(hyper::header::ACCEPT, "application/json")
-        .body(Default::default())?;
+        .body(hyper::Body::default())?;
     let response = crate::res_to_error(send_http_request(&ctx.http_client, request).await?).await?;
     let body = read_http_body(response).await?;
 
@@ -404,8 +404,20 @@ AND NOT EXISTS (\
     AND params->>'preview'='true'\
 ) \
 AND NOT EXISTS (\
-    SELECT 1 FROM post \
-    WHERE community=$5\
+    SELECT 1 FROM task \
+    WHERE kind=$1 \
+    AND state='completed' \
+    AND completed_at > current_timestamp - INTERVAL '2 HOURS' \
+    AND params->>'community_id'=$4 \
+    AND params->>'preview'='true'\
+) \
+AND NOT EXISTS (\
+    SELECT 1 FROM task \
+    WHERE kind=$1 \
+    AND state='failed' \
+    AND attempted_at > current_timestamp - INTERVAL '30 MINUTES' \
+    AND params->>'community_id'=$4 \
+    AND params->>'preview'='true'\
 )";
 
 const ENQUEUE_COLLECTION_TARGET_PREVIEW_FETCH_SQL: &str = "\
@@ -636,7 +648,11 @@ fn single_actor_ap_id(
     let mut ids = value.iter().filter_map(any_base_ap_id);
     let id = ids.next()?;
 
-    if ids.next().is_none() { Some(id) } else { None }
+    if ids.next().is_none() {
+        Some(id)
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -688,9 +704,9 @@ pub type ExtendedPostlike<T> =
 pub fn make_extended_postlike<T>(src: T) -> ExtendedPostlike<T> {
     ExtendedPostlike::new(
         src,
-        Default::default(),
-        Default::default(),
-        Default::default(),
+        TargetExtension::default(),
+        SensitiveExtension::default(),
+        MbinMirrorExtension::default(),
     )
 }
 
@@ -826,8 +842,8 @@ pub enum ActorLocalInfo {
 impl ActorLocalInfo {
     pub fn public_key(&self) -> Option<&PubKeyInfo> {
         match self {
-            ActorLocalInfo::User { public_key, .. } => public_key.as_ref(),
-            ActorLocalInfo::Community { public_key, .. } => public_key.as_ref(),
+            ActorLocalInfo::User { public_key, .. }
+            | ActorLocalInfo::Community { public_key, .. } => public_key.as_ref(),
         }
     }
 
@@ -999,7 +1015,7 @@ async fn fetch_ap_object_raw_inner(
         let request = hyper::Request::get(&current_id)
             .header(hyper::header::USER_AGENT, &ctx.user_agent)
             .header(hyper::header::ACCEPT, ACTIVITY_TYPE_HEADER_VALUE)
-            .body(Default::default())?;
+            .body(hyper::Body::default())?;
         let res = crate::res_to_error(send_http_request(&ctx.http_client, request).await?).await?;
 
         let content_type = res.headers().get(hyper::header::CONTENT_TYPE);
@@ -1895,7 +1911,7 @@ pub fn spawn_enqueue_send_community_follow_undo(
 
             let row = db
                 .query_one(
-                    "SELECT community.local, community.ap_inbox, community.ap_id, local_community_follow_undo.follow_ap_id FROM community INNER JOIN local_community_follow_undo ON (local_community_follow_undo.community=community.id) WHERE community.id=$1 AND local_community_follow_undo.id=$2",
+                    "SELECT community.local, COALESCE(community.ap_inbox, community.ap_shared_inbox), community.ap_id, local_community_follow_undo.follow_ap_id FROM community INNER JOIN local_community_follow_undo ON (local_community_follow_undo.community=community.id) WHERE community.id=$1 AND local_community_follow_undo.id=$2",
                     &[&community_local_id, &undo_id],
                 )
                 .await?;
@@ -1903,28 +1919,27 @@ pub fn spawn_enqueue_send_community_follow_undo(
             if local {
                 // no need to send follow state to ourself
                 return Ok(());
-            } else {
-                let community_inbox: Option<&str> = row.get(1);
-                let ap_id: Option<&str> = row.get(2);
-
-                (
-                    community_inbox
-                        .ok_or_else(|| {
-                            crate::Error::InternalStr(format!(
-                                "Missing apub info for community {community_local_id}",
-                            ))
-                        })?
-                        .parse()?,
-                    ap_id
-                        .ok_or_else(|| {
-                            crate::Error::InternalStr(format!(
-                                "Missing apub info for community {community_local_id}",
-                            ))
-                        })?
-                        .parse()?,
-                    row.get::<_, Option<&str>>(3).map(str::parse).transpose()?,
-                )
             }
+            let community_inbox: Option<&str> = row.get(1);
+            let ap_id: Option<&str> = row.get(2);
+
+            (
+                community_inbox
+                    .ok_or_else(|| {
+                        crate::Error::InternalStr(format!(
+                            "Missing apub info for community {community_local_id}",
+                        ))
+                    })?
+                    .parse()?,
+                ap_id
+                    .ok_or_else(|| {
+                        crate::Error::InternalStr(format!(
+                            "Missing apub info for community {community_local_id}",
+                        ))
+                    })?
+                    .parse()?,
+                row.get::<_, Option<&str>>(3).map(str::parse).transpose()?,
+            )
         };
 
         let undo = local_community_follow_undo_to_ap(
@@ -2498,26 +2513,25 @@ pub fn spawn_enqueue_send_user_follow(
             if local {
                 // no need to send follows to ourself
                 return Ok(());
-            } else {
-                let ap_id: Option<&str> = row.get(1);
-                let ap_inbox: Option<&str> = row.get(2);
-
-                (if let Some(ap_id) = ap_id {
-                    ap_inbox
-                        .map(|ap_inbox| {
-                            Ok::<(url::Url, url::Url), crate::Error>((
-                                ap_id.parse()?,
-                                ap_inbox.parse()?,
-                            ))
-                        })
-                        .transpose()?
-                } else {
-                    None
-                })
-                .ok_or_else(|| {
-                    crate::Error::InternalStr(format!("Missing apub info for user {target_user}"))
-                })?
             }
+            let ap_id: Option<&str> = row.get(1);
+            let ap_inbox: Option<&str> = row.get(2);
+
+            (if let Some(ap_id) = ap_id {
+                ap_inbox
+                    .map(|ap_inbox| {
+                        Ok::<(url::Url, url::Url), crate::Error>((
+                            ap_id.parse()?,
+                            ap_inbox.parse()?,
+                        ))
+                    })
+                    .transpose()?
+            } else {
+                None
+            })
+            .ok_or_else(|| {
+                crate::Error::InternalStr(format!("Missing apub info for user {target_user}"))
+            })?
         };
 
         let follower_ap_id = LocalObjectRef::User(follower).to_local_uri(&ctx.host_url_apub);
@@ -2583,28 +2597,27 @@ pub fn spawn_enqueue_send_user_follow_undo(
             if local {
                 // no need to send follow state to ourself
                 return Ok(());
-            } else {
-                let ap_inbox: Option<&str> = row.get(1);
-                let ap_id: Option<&str> = row.get(2);
-
-                (
-                    ap_inbox
-                        .ok_or_else(|| {
-                            crate::Error::InternalStr(format!(
-                                "Missing apub info for user {target_user}"
-                            ))
-                        })?
-                        .parse()?,
-                    ap_id
-                        .ok_or_else(|| {
-                            crate::Error::InternalStr(format!(
-                                "Missing apub info for user {target_user}"
-                            ))
-                        })?
-                        .parse()?,
-                    row.get::<_, Option<&str>>(3).map(str::parse).transpose()?,
-                )
             }
+            let ap_inbox: Option<&str> = row.get(1);
+            let ap_id: Option<&str> = row.get(2);
+
+            (
+                ap_inbox
+                    .ok_or_else(|| {
+                        crate::Error::InternalStr(format!(
+                            "Missing apub info for user {target_user}"
+                        ))
+                    })?
+                    .parse()?,
+                ap_id
+                    .ok_or_else(|| {
+                        crate::Error::InternalStr(format!(
+                            "Missing apub info for user {target_user}"
+                        ))
+                    })?
+                    .parse()?,
+                row.get::<_, Option<&str>>(3).map(str::parse).transpose()?,
+            )
         };
 
         let undo = local_user_follow_undo_to_ap(
@@ -2682,27 +2695,22 @@ pub fn spawn_enqueue_send_user_follow_accept(
             if local {
                 // Shouldn't happen, but fine to ignore it
                 return Ok(());
-            } else {
-                let ap_inbox: Option<&str> = row.get(1);
-                let ap_id: Option<&str> = row.get(2);
-
-                (
-                    ap_inbox
-                        .ok_or_else(|| {
-                            crate::Error::InternalStr(format!(
-                                "Missing apub info for user {follower}"
-                            ))
-                        })?
-                        .parse()?,
-                    ap_id
-                        .ok_or_else(|| {
-                            crate::Error::InternalStr(format!(
-                                "Missing apub info for user {follower}"
-                            ))
-                        })?
-                        .parse()?,
-                )
             }
+            let ap_inbox: Option<&str> = row.get(1);
+            let ap_id: Option<&str> = row.get(2);
+
+            (
+                ap_inbox
+                    .ok_or_else(|| {
+                        crate::Error::InternalStr(format!("Missing apub info for user {follower}"))
+                    })?
+                    .parse()?,
+                ap_id
+                    .ok_or_else(|| {
+                        crate::Error::InternalStr(format!("Missing apub info for user {follower}"))
+                    })?
+                    .parse()?,
+            )
         };
 
         let accept =
@@ -2754,27 +2762,22 @@ pub fn spawn_enqueue_send_community_follow_accept(
             if local {
                 // Shouldn't happen, but fine to ignore it
                 return Ok(());
-            } else {
-                let ap_inbox: Option<&str> = row.get(1);
-                let ap_id: Option<&str> = row.get(2);
-
-                (
-                    ap_inbox
-                        .ok_or_else(|| {
-                            crate::Error::InternalStr(format!(
-                                "Missing apub info for user {follower}"
-                            ))
-                        })?
-                        .parse()?,
-                    ap_id
-                        .ok_or_else(|| {
-                            crate::Error::InternalStr(format!(
-                                "Missing apub info for user {follower}"
-                            ))
-                        })?
-                        .parse()?,
-                )
             }
+            let ap_inbox: Option<&str> = row.get(1);
+            let ap_id: Option<&str> = row.get(2);
+
+            (
+                ap_inbox
+                    .ok_or_else(|| {
+                        crate::Error::InternalStr(format!("Missing apub info for user {follower}"))
+                    })?
+                    .parse()?,
+                ap_id
+                    .ok_or_else(|| {
+                        crate::Error::InternalStr(format!("Missing apub info for user {follower}"))
+                    })?
+                    .parse()?,
+            )
         };
 
         let accept =
@@ -3106,10 +3109,11 @@ pub fn local_comment_to_ap(
         .set_published(chrono_to_offset_datetime(&comment.created))
         .set_in_reply_to(parent_ap_id.unwrap_or_else(|| post_ap_id.clone()));
 
-    if let Some(attachment_href) = ctx.process_attachments_inner(
-        comment.attachment_href.as_deref().map(Cow::Borrowed),
-        comment.id,
-    ) {
+    if let Some(attachment_href) = comment
+        .attachment_href
+        .as_deref()
+        .map(|href| ctx.process_attachment_href(Cow::Borrowed(href), comment.id))
+    {
         let mut attachment = activitystreams::object::Image::new();
         attachment.set_url(attachment_href.into_owned());
 
@@ -4025,7 +4029,7 @@ pub async fn fetch_url_from_webfinger(
     log::debug!("{uri}");
     let https_request = hyper::Request::get(uri)
         .header(hyper::header::USER_AGENT, &ctx.user_agent)
-        .body(Default::default())?;
+        .body(hyper::Body::default())?;
     let res = send_http_request(&ctx.http_client, https_request).await;
 
     let res = if ctx.dev_mode {
@@ -4040,7 +4044,7 @@ pub async fn fetch_url_from_webfinger(
                 &ctx.http_client,
                 hyper::Request::get(uri)
                     .header(hyper::header::USER_AGENT, &ctx.user_agent)
-                    .body(Default::default())?,
+                    .body(hyper::Body::default())?,
             )
             .await?
         }
@@ -4088,7 +4092,6 @@ mod tests {
 
     use activitystreams::actor::ApActorExt;
     use activitystreams::prelude::*;
-    use base64::Engine as _;
     use std::borrow::Cow;
 
     struct OutgoingWriteTarget {
@@ -4191,7 +4194,8 @@ mod tests {
             followers: "https://spectra.video/video-channels/fediforum_demos/followers",
             author: "https://spectra.video/accounts/fediforum",
             post: "https://spectra.video/videos/watch/a72ea3ba-ddcd-40f6-af9f-8219b72bd6ac",
-            comment: "https://spectra.video/videos/watch/a72ea3ba-ddcd-40f6-af9f-8219b72bd6ac/comments/1",
+            comment:
+                "https://spectra.video/videos/watch/a72ea3ba-ddcd-40f6-af9f-8219b72bd6ac/comments/1",
         },
         OutgoingWriteTarget {
             platform: "mobilizon",
@@ -4311,18 +4315,6 @@ mod tests {
         .max_size(1)
         .build()
         .expect("Failed to initialize test Postgres connection pool");
-        let vapid_key = openssl::ec::EcKey::generate(
-            openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1)
-                .unwrap()
-                .as_ref(),
-        )
-        .unwrap();
-        let vapid_signature_builder = web_push::VapidSignatureBuilder::from_pem_no_sub::<&[u8]>(
-            vapid_key.private_key_to_pem().unwrap().as_ref(),
-        )
-        .unwrap();
-        let vapid_public_key_base64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(vapid_signature_builder.get_public_key());
         let host_url_apub: crate::BaseURL = "https://lotide.example/apub".parse().unwrap();
 
         crate::BaseContext {
@@ -4336,8 +4328,6 @@ mod tests {
             apub_proxy_rewrites: false,
             media_storage: None,
             api_ratelimit: henry::RatelimitBucket::new(300),
-            vapid_public_key_base64,
-            vapid_signature_builder,
             break_stuff: false,
             dev_mode: true,
             local_hostname: "lotide.example".to_owned(),
@@ -5484,7 +5474,7 @@ mod tests {
     }
 
     #[test]
-    fn outbox_preview_enqueue_deduplicates_empty_communities() {
+    fn outbox_preview_enqueue_deduplicates_recent_preview_tasks() {
         let sql = super::ENQUEUE_OUTBOX_PREVIEW_FETCH_SQL;
 
         assert!(sql.contains("AND NOT EXISTS"));
@@ -5497,8 +5487,10 @@ mod tests {
         assert!(sql.contains("AND NOT local"));
         assert!(sql.contains("AND NOT deleted"));
         assert!(!sql.contains("SELECT 1 FROM community_follow"));
-        assert!(sql.contains("SELECT 1 FROM post"));
-        assert!(sql.contains("WHERE community=$5"));
+        assert!(sql.contains("state='completed'"));
+        assert!(sql.contains("INTERVAL '2 HOURS'"));
+        assert!(sql.contains("state='failed'"));
+        assert!(sql.contains("INTERVAL '30 MINUTES'"));
     }
 
     #[test]
@@ -5820,11 +5812,9 @@ mod tests {
             "id": "https://spectra.video/videos/watch/a72ea3ba-ddcd-40f6-af9f-8219b72bd6ac"
         });
 
-        assert!(
-            super::verify_embedded_known_object(value, false)
-                .unwrap()
-                .is_none()
-        );
+        assert!(super::verify_embedded_known_object(value, false)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -1,6 +1,5 @@
 use serde_derive::Deserialize;
 use std::collections::HashMap;
-use std::ops::Deref;
 
 pub const ACTIVITY_TYPE: &str =
     "application/ld+json; profile=\"https://www.w3.org/ns/activitystreams\"";
@@ -193,7 +192,7 @@ struct TestCreateUserResponse {
 #[allow(dead_code)]
 async fn create_account(client: &reqwest::Client, server: &TestServer) -> String {
     let resp = client
-        .post(format!("{}/api/unstable/users", server.real_host_url).deref())
+        .post(format!("{}/api/unstable/users", server.real_host_url))
         .json(&serde_json::json!({
             "username": random_string(),
             "password": random_string(),
@@ -218,7 +217,7 @@ async fn create_account(client: &reqwest::Client, server: &TestServer) -> String
 #[allow(dead_code)]
 async fn create_account_with_id(client: &reqwest::Client, server: &TestServer) -> (i64, String) {
     let resp = client
-        .post(format!("{}/api/unstable/users", server.real_host_url).deref())
+        .post(format!("{}/api/unstable/users", server.real_host_url))
         .json(&serde_json::json!({
             "username": random_string(),
             "password": random_string(),
@@ -249,7 +248,7 @@ async fn create_community(
     let community_name = random_string();
 
     let resp = client
-        .post(format!("{}/api/unstable/communities", server.real_host_url).deref())
+        .post(format!("{}/api/unstable/communities", server.real_host_url))
         .bearer_auth(token)
         .json(&serde_json::json!({ "name": community_name }))
         .send()
@@ -268,14 +267,11 @@ async fn create_community(
 
 async fn lookup_community(client: &reqwest::Client, server: &TestServer, ap_id: &str) -> i64 {
     let resp = client
-        .get(
-            format!(
-                "{}/api/unstable/actors:lookup/{}",
-                server.real_host_url,
-                percent_encoding::utf8_percent_encode(ap_id, percent_encoding::NON_ALPHANUMERIC)
-            )
-            .deref(),
-        )
+        .get(format!(
+            "{}/api/unstable/actors:lookup/{}",
+            server.real_host_url,
+            percent_encoding::utf8_percent_encode(ap_id, percent_encoding::NON_ALPHANUMERIC)
+        ))
         .send()
         .await
         .unwrap()
@@ -311,13 +307,10 @@ async fn community_fetch() {
     let community_remote_id = lookup_community(&client, &server, &ap_id).await;
 
     let resp = client
-        .get(
-            format!(
-                "{}/api/unstable/communities/{}",
-                server.real_host_url, community_remote_id
-            )
-            .deref(),
-        )
+        .get(format!(
+            "{}/api/unstable/communities/{}",
+            server.real_host_url, community_remote_id
+        ))
         .send()
         .await
         .unwrap()

@@ -5,7 +5,7 @@ ActivityPub endpoints, media handling, and background task worker. It does not
 serve the normal browser UI by itself; install Hitide for that.
 
 This guide documents the direct Debian source-tree install used by the live
-Lotide instance. There are also helper scripts under `build_scripts/` that install
+production instance. There are also helper scripts under `build_scripts/` that install
 a more conventional `/usr/local/bin` layout, but the direct `/var/lotide`
 layout is the one described here because it matches the wrapper script and
 systemd unit that are known to start the current service successfully.
@@ -101,7 +101,7 @@ sudo install -d -o lotide -g lotide -m 0750 /var/lotide/media
 sudo chown -R lotide:lotide /var/lotide
 ```
 
-If you are deploying this maintained tree instead of the public upstream,
+If you are deploying this locally maintained tree instead of the public upstream,
 copy or clone that tree into `/var/lotide` and keep the same ownership.
 
 ## Build

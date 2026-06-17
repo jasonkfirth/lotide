@@ -1,5 +1,4 @@
 use crate::hyper;
-use crate::lang;
 use crate::types::{
     ActorLocalRef, CollectionTargetLocalID, CommentLocalID, CommunityLocalID, NotificationID,
     NotificationSubscriptionID, PostLocalID, UserLocalID,
@@ -2059,8 +2058,11 @@ const LEMMY_THREAD_COMMENT_PAGE_SIZE: usize = 50;
 const LEMMY_THREAD_COMMENT_MAX_PAGES: usize = 4;
 const PLATFORM_THREAD_COMMENT_PAGE_SIZE: usize = 50;
 const PLATFORM_THREAD_COMMENT_MAX_PAGES: usize = 4;
+const PLATFORM_THREAD_FETCH_PENDING_HOST_LIMIT: i64 = 50;
 const ACTIVITYPUB_LIKE_COLLECTION_MAX_PAGES: usize = 3;
 const ACTIVITYPUB_LIKE_COLLECTION_MAX_ITEMS: usize = 120;
+
+const _: () = assert!(PLATFORM_THREAD_FETCH_PENDING_HOST_LIMIT >= 10);
 const ENQUEUE_POST_REPLIES_FETCH_SQL: &str = "\
 INSERT INTO task (kind, params, max_attempts, created_at) \
 SELECT $1, $2, $3, current_timestamp \
@@ -2078,7 +2080,14 @@ WHERE NOT EXISTS (\
     WHERE kind=$1 \
     AND state IN ('pending', 'running') \
     AND params->>'post_id'=$4\
-)";
+ ) \
+AND (\
+    SELECT COUNT(1) \
+    FROM task \
+    WHERE kind=$1 \
+    AND state IN ('pending', 'running') \
+    AND lower(regexp_replace(substring(params->>'post_ap_id' from '^https?://([^/]+)'), '^www\\.', ''))=$5\
+) < $6";
 const ENQUEUE_REMOTE_POST_REFRESH_SQL: &str = "\
 INSERT INTO task (kind, params, max_attempts, created_at) \
 SELECT $1, $2, $3, current_timestamp \
@@ -2677,8 +2686,9 @@ fn peertube_video_id_from_ap_url(url: &url::Url) -> Option<String> {
     let mut segments = url.path_segments()?;
 
     match (segments.next(), segments.next(), segments.next()) {
-        (Some("videos"), Some("watch"), Some(video_id)) => Some(video_id.to_owned()),
-        (Some("w"), Some(video_id), None) => Some(video_id.to_owned()),
+        (Some("videos"), Some("watch"), Some(video_id)) | (Some("w"), Some(video_id), None) => {
+            Some(video_id.to_owned())
+        }
         _ => None,
     }
 }
@@ -3818,6 +3828,11 @@ fn platform_thread_fetch_error_is_permanent(err: &crate::Error) -> bool {
         "\"error\": \"gone\"",
         "forbidden",
         "unauthorized",
+        "error code: 1015",
+        "rate limited",
+        "too many requests",
+        "just a moment",
+        "cloudflare",
     ]
     .iter()
     .any(|needle| err.contains(needle))
@@ -3876,7 +3891,7 @@ async fn fetch_text(
             hyper::Request::get(uri)
                 .header(hyper::header::USER_AGENT, &ctx.user_agent)
                 .header(hyper::header::ACCEPT, accept)
-                .body(Default::default())?,
+                .body(hyper::Body::default())?,
         )
         .await?,
     )
@@ -3904,7 +3919,7 @@ async fn fetch_atom_feed(
             hyper::Request::get(uri)
                 .header(hyper::header::USER_AGENT, &ctx.user_agent)
                 .header(hyper::header::ACCEPT, "application/atom+xml")
-                .body(Default::default())?,
+                .body(hyper::Body::default())?,
         )
         .await?,
     )
@@ -3927,6 +3942,8 @@ fn json_url(value: &serde_json::Value, keys: &[&str]) -> Option<url::Url> {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct DiscoverServerCommunities {
     pub host: String,
+    #[serde(default)]
+    pub software: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -4150,20 +4167,19 @@ latest_error=NULL, \
 software=COALESCE(community_discovery_server.software, EXCLUDED.software) \
 WHERE community_discovery_server.suppressed_reason IS NULL";
 const MARK_COMMUNITY_DISCOVERY_FAILURE_SQL: &str = "\
-WITH updated AS (\
-    INSERT INTO community_discovery_server \
-    (host, active, last_checked, failed_checks, latest_error) \
-    VALUES ($1, TRUE, current_timestamp, 1, $2) \
-    ON CONFLICT (host) DO UPDATE SET \
-    last_checked=current_timestamp, \
-    failed_checks=community_discovery_server.failed_checks + 1, \
-    latest_error=$2, \
-    active=(community_discovery_server.failed_checks + 1 < 3) \
-    RETURNING active\
-) \
-UPDATE community_discovery \
-SET active=FALSE \
-WHERE host=$1";
+INSERT INTO community_discovery_server \
+(host, active, last_checked, failed_checks, latest_error) \
+VALUES ($1, TRUE, current_timestamp, 1, $2) \
+ON CONFLICT (host) DO UPDATE SET \
+last_checked=current_timestamp, \
+failed_checks=community_discovery_server.failed_checks + 1, \
+latest_error=$2, \
+active=(CASE \
+    WHEN $3::BOOLEAN \
+        AND community_discovery_server.last_success > current_timestamp - INTERVAL '7 DAYS' \
+    THEN TRUE \
+    ELSE community_discovery_server.failed_checks + 1 < 3 \
+END)";
 const FIND_COMMUNITY_HOST_INTERACTION_PROBE_TARGET_SQL: &str = "\
 SELECT post.id, post.ap_id, person.ap_id, community.ap_id, \
     COALESCE(community.ap_inbox, community.ap_shared_inbox), probe_user.id \
@@ -4973,15 +4989,49 @@ fn parse_friendica_directory_communities_from_html(
     html: &str,
     host: &str,
 ) -> Vec<DiscoveredCommunity> {
-    let profile_pattern = format!(
+    let absolute_profile_pattern = format!(
         r"https://{}/profile/([A-Za-z0-9_][A-Za-z0-9_.-]{{0,63}})",
         regex::escape(host)
     );
-    let Ok(profile_regex) = regex::Regex::new(&profile_pattern) else {
+    let relative_profile_pattern = r#"href=["'](/profile/[A-Za-z0-9_][A-Za-z0-9_.-]{0,63})["']"#;
+    let Ok(absolute_profile_regex) = regex::Regex::new(&absolute_profile_pattern) else {
+        return Vec::new();
+    };
+    let Ok(relative_profile_regex) = regex::Regex::new(relative_profile_pattern) else {
         return Vec::new();
     };
     let mut seen = HashSet::new();
     let mut communities = Vec::new();
+    let mut candidates = Vec::new();
+
+    for capture in absolute_profile_regex.captures_iter(html) {
+        let Some(actor_match) = capture.get(0) else {
+            continue;
+        };
+
+        candidates.push((
+            actor_match.start(),
+            actor_match.end(),
+            actor_match.as_str().to_owned(),
+        ));
+    }
+
+    for capture in relative_profile_regex.captures_iter(html) {
+        let Some(full_match) = capture.get(0) else {
+            continue;
+        };
+        let Some(path_match) = capture.get(1) else {
+            continue;
+        };
+
+        candidates.push((
+            full_match.start(),
+            full_match.end(),
+            format!("https://{host}{}", path_match.as_str()),
+        ));
+    }
+
+    candidates.sort_by_key(|(match_start, _, _)| *match_start);
 
     /*
         Friendica directories mix people, services, news accounts, and forums.
@@ -4989,27 +5039,19 @@ fn parse_friendica_directory_communities_from_html(
         that local card context as a conservative hint, then let the actor and
         feed checks decide whether the candidate is visible.
     */
-    for capture in profile_regex.captures_iter(html) {
+    for (match_start, match_end, actor_url) in candidates {
         if communities.len() >= SERVER_COMMUNITY_DISCOVERY_MAX_COMMUNITIES {
             break;
         }
 
-        let Some(actor_match) = capture.get(0) else {
-            continue;
-        };
-        let actor_url = actor_match.as_str();
-        let match_start = actor_match.start();
         let context_start = html[..match_start]
             .rfind("contact-entry-wrapper")
             .and_then(|wrapper| html[..wrapper].rfind("<div"))
             .unwrap_or_else(|| match_start.saturating_sub(512));
-        let suffix_start = actor_match.end();
-        let context_end = html[suffix_start..]
-            .find("contact-entry-wrapper")
-            .map_or_else(
-                || html.len().min(match_start + 1536),
-                |next| suffix_start + next,
-            );
+        let context_end = html[match_end..].find("contact-entry-wrapper").map_or_else(
+            || html.len().min(match_start + 1536),
+            |next| match_end + next,
+        );
         let context = html.get(context_start..context_end).unwrap_or("");
 
         if !context.contains("(Group)") {
@@ -5742,12 +5784,16 @@ async fn fetch_discovered_actor(
     crate::apub_util::fetch_ap_collection_raw(actor_url, ctx).await
 }
 
+fn discovery_count_if_active(post_count: Option<i64>) -> Option<i64> {
+    post_count.filter(|post_count| *post_count >= SERVER_COMMUNITY_DISCOVERY_MIN_POSTS)
+}
+
 async fn discovered_community_post_count(
     community: &DiscoveredCommunity,
     ctx: &Arc<crate::BaseContext>,
 ) -> Result<Option<i64>, crate::Error> {
     if let Some(post_count) = community.post_count {
-        return Ok((post_count >= SERVER_COMMUNITY_DISCOVERY_MIN_POSTS).then_some(post_count));
+        return Ok(discovery_count_if_active(Some(post_count)));
     }
 
     let outbox_url = match community.outbox.clone() {
@@ -5768,7 +5814,7 @@ async fn discovered_community_post_count(
         friendica_atom_timeline_url_from_community_urls(&community.ap_id, outbox_url)
     }) {
         match fetch_friendica_atom_timeline_post_count(feed_url, ctx).await {
-            Ok(Some(feed_count)) => return Ok(Some(feed_count)),
+            Ok(Some(feed_count)) => return Ok(discovery_count_if_active(Some(feed_count))),
             Ok(None) => {}
             Err(err) => {
                 log::debug!(
@@ -5780,7 +5826,7 @@ async fn discovered_community_post_count(
         }
     }
 
-    Ok(outbox_count)
+    Ok(discovery_count_if_active(outbox_count))
 }
 
 async fn active_discovered_communities(
@@ -5986,10 +6032,17 @@ fn parse_fedigroups_directory_communities_from_html(
         r"https://{}/@([A-Za-z0-9_][A-Za-z0-9_.-]{{0,63}})",
         regex::escape(host)
     );
+    let user_link_pattern = format!(
+        r"https://{}/users/([A-Za-z0-9_][A-Za-z0-9_.-]{{0,63}})",
+        regex::escape(host)
+    );
     let Ok(account_regex) = regex::Regex::new(&account_pattern) else {
         return Vec::new();
     };
     let Ok(actor_link_regex) = regex::Regex::new(&actor_link_pattern) else {
+        return Vec::new();
+    };
+    let Ok(user_link_regex) = regex::Regex::new(&user_link_pattern) else {
         return Vec::new();
     };
     let mut seen = HashSet::new();
@@ -6008,6 +6061,18 @@ fn parse_fedigroups_directory_communities_from_html(
     }
 
     for capture in actor_link_regex.captures_iter(html) {
+        if communities.len() >= SERVER_COMMUNITY_DISCOVERY_MAX_COMMUNITIES {
+            break;
+        }
+
+        let Some(handle) = capture.get(1).map(|handle| handle.as_str()) else {
+            continue;
+        };
+
+        push_fedigroups_discovered_community(host, handle, &mut seen, &mut communities);
+    }
+
+    for capture in user_link_regex.captures_iter(html) {
         if communities.len() >= SERVER_COMMUNITY_DISCOVERY_MAX_COMMUNITIES {
             break;
         }
@@ -6220,9 +6285,9 @@ fn normalize_discovery_host_or_url(value: &str) -> Option<String> {
 
 fn canonical_discovery_software(value: &str) -> Option<&'static str> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "lemmy" => Some("lemmy-compatible"),
-        "piefed" => Some("piefed-compatible"),
-        "mbin" | "kbin" => Some("mbin-compatible"),
+        "lemmy" | "lemmy-compatible" => Some("lemmy-compatible"),
+        "piefed" | "piefed-compatible" => Some("piefed-compatible"),
+        "mbin" | "kbin" | "mbin-compatible" => Some("mbin-compatible"),
         "peertube" => Some("peertube"),
         "nodebb" => Some("nodebb"),
         "discourse" => Some("discourse"),
@@ -6235,6 +6300,7 @@ fn canonical_discovery_software(value: &str) -> Option<&'static str> {
         "bonfire" => Some("bonfire"),
         "funkwhale" => Some("funkwhale"),
         "gancio" => Some("gancio"),
+        "fedigroups" | "fedigroups-directory" => Some("fedigroups-directory"),
         _ => None,
     }
 }
@@ -6572,8 +6638,63 @@ fn discovery_error_reason(mut errors: Vec<String>) -> String {
     truncate_community_follow_rejection_reason(errors.join("\n"))
 }
 
+fn community_discovery_failure_is_transient(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+
+    /*
+        Discovery has to be polite and opportunistic. A timeout, temporary DNS
+        failure, or gateway error does not prove that a host stopped federating.
+        Keep recently successful hosts visible through those short outages, but
+        still let never-working hosts age out through the normal failure count.
+    */
+    [
+        "timed out",
+        "timeout",
+        "remote request timed out",
+        "remote response timed out",
+        "dns lookup failed",
+        "temporary failure",
+        "failed to lookup address information",
+        "no route to host",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "connection aborted",
+        "502 bad gateway",
+        "503 service unavailable",
+        "504 gateway timeout",
+        "cloudflare challenge",
+        "tls certificate verification failed",
+    ]
+    .iter()
+    .any(|needle| reason.contains(needle))
+}
+
+async fn try_mbin_directory_discovery(
+    host: &str,
+    ctx: &Arc<crate::BaseContext>,
+    errors: &mut Vec<String>,
+) -> Option<(&'static str, Vec<DiscoveredCommunity>)> {
+    match fetch_mbin_directory_communities(host, ctx).await {
+        Ok(communities) if !communities.is_empty() => {
+            let active = active_discovered_communities(communities, host, ctx).await;
+
+            if !active.is_empty() {
+                return Some(("mbin-compatible", active));
+            }
+
+            errors.push("mbin-html-directory returned no active communities".to_owned());
+        }
+        Ok(_) => errors.push("mbin-html-directory returned no magazine candidates".to_owned()),
+        Err(err) => errors.push(format!("mbin-html-directory failed: {err:?}")),
+    }
+
+    None
+}
+
 async fn fetch_server_communities_for_discovery(
     host: &str,
+    known_software: Option<&'static str>,
     ctx: &Arc<crate::BaseContext>,
 ) -> Result<(&'static str, Vec<DiscoveredCommunity>), crate::Error> {
     let mut errors = Vec::new();
@@ -6585,6 +6706,13 @@ async fn fetch_server_communities_for_discovery(
         }
     };
     let static_software = static_discovery_software_for_host(host);
+    let nodeinfo_software = nodeinfo_discovery
+        .as_ref()
+        .and_then(|discovery| discovery.software);
+    let is_mbin_host = known_software == Some("mbin-compatible")
+        || nodeinfo_software == Some("mbin-compatible")
+        || static_software == Some("mbin-compatible")
+        || host_looks_like_mbin(host);
 
     match fetch_fedigroups_directory_communities(host, ctx).await {
         Ok(communities) if !communities.is_empty() => {
@@ -6651,6 +6779,17 @@ async fn fetch_server_communities_for_discovery(
         return Err(crate::Error::InternalStr(discovery_error_reason(errors)));
     }
 
+    /*
+        Mbin installs often expose a public HTML magazine directory while their
+        JSON magazine API requires login. Use that known-good path first when a
+        trusted seed, NodeInfo, or host hint already tells us the software class.
+    */
+    if is_mbin_host {
+        if let Some(result) = try_mbin_directory_discovery(host, ctx, &mut errors).await {
+            return Ok(result);
+        }
+    }
+
     let mut discovery_hosts = vec![host.to_owned()];
     if !host.starts_with("www.") {
         discovery_hosts.push(format!("www.{host}"));
@@ -6698,25 +6837,9 @@ async fn fetch_server_communities_for_discovery(
         }
     }
 
-    let nodeinfo_software = nodeinfo_discovery
-        .as_ref()
-        .and_then(|discovery| discovery.software);
-    if nodeinfo_software == Some("mbin-compatible")
-        || static_software == Some("mbin-compatible")
-        || host_looks_like_mbin(host)
-    {
-        match fetch_mbin_directory_communities(host, ctx).await {
-            Ok(communities) if !communities.is_empty() => {
-                let active = active_discovered_communities(communities, host, ctx).await;
-
-                if !active.is_empty() {
-                    return Ok(("mbin-compatible", active));
-                }
-
-                errors.push("mbin-html-directory returned no active communities".to_owned());
-            }
-            Ok(_) => errors.push("mbin-html-directory returned no magazine candidates".to_owned()),
-            Err(err) => errors.push(format!("mbin-html-directory failed: {err:?}")),
+    if !is_mbin_host {
+        if let Some(result) = try_mbin_directory_discovery(host, ctx, &mut errors).await {
+            return Ok(result);
         }
     }
 
@@ -6832,9 +6955,13 @@ impl TaskDef for DiscoverServerCommunities {
             }
         }
 
+        let known_software = self
+            .software
+            .as_deref()
+            .and_then(canonical_discovery_software);
         let discovery_result = match tokio::time::timeout(
             SERVER_COMMUNITY_DISCOVERY_TASK_TIMEOUT,
-            fetch_server_communities_for_discovery(&host, &ctx),
+            fetch_server_communities_for_discovery(&host, known_software, &ctx),
         )
         .await
         {
@@ -6849,9 +6976,13 @@ impl TaskDef for DiscoverServerCommunities {
             Err(err) => {
                 let reason = truncate_community_follow_rejection_reason(format!("{err:?}"));
                 let db = ctx.db_pool.get().await?;
+                let transient = community_discovery_failure_is_transient(&reason);
 
-                db.execute(MARK_COMMUNITY_DISCOVERY_FAILURE_SQL, &[&host, &reason])
-                    .await?;
+                db.execute(
+                    MARK_COMMUNITY_DISCOVERY_FAILURE_SQL,
+                    &[&host, &reason, &transient],
+                )
+                .await?;
 
                 log::warn!("Failed to discover communities for {host}: {reason}");
                 return Ok(());
@@ -8766,6 +8897,14 @@ pub async fn enqueue_platform_post_thread_fetch(
         return Ok(());
     }
 
+    let post_host = crate::get_url_host(&post_ap_id)
+        .map(|host| {
+            host.strip_prefix("www.")
+                .unwrap_or(host.as_str())
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+
     let task = FetchPlatformPostThread {
         post_id,
         post_ap_id,
@@ -8779,6 +8918,8 @@ pub async fn enqueue_platform_post_thread_fetch(
             &tokio_postgres::types::Json(&task),
             &FetchPlatformPostThread::MAX_ATTEMPTS,
             &post_id.raw().to_string(),
+            &post_host,
+            &PLATFORM_THREAD_FETCH_PENDING_HOST_LIMIT,
         ],
     )
     .await?;
@@ -8873,6 +9014,77 @@ struct LemmyComment {
 struct PeerTubeVideoResponse {
     #[serde(default)]
     likes: i64,
+}
+
+const INBOUND_ANNOUNCE_ACTOR_IS_TRACKED_SQL: &str = "\
+SELECT EXISTS(\
+    SELECT 1 \
+    FROM community \
+    INNER JOIN community_follow \
+        ON community_follow.community=community.id \
+        AND community_follow.local \
+        AND community_follow.accepted \
+    WHERE NOT community.deleted \
+    AND community.ap_id=$1\
+)";
+const INBOUND_DELETE_ACTIVITY_IS_TRACKED_SQL: &str = "\
+SELECT EXISTS(\
+    SELECT 1 FROM person WHERE ap_id=$1 OR ap_id=$2 \
+    UNION ALL SELECT 1 FROM community WHERE ap_id=$1 OR ap_id=$2 \
+    UNION ALL SELECT 1 FROM post WHERE ap_id=$2 \
+    UNION ALL SELECT 1 FROM reply WHERE ap_id=$2 \
+    UNION ALL SELECT 1 FROM post_like WHERE ap_id=$2 \
+    UNION ALL SELECT 1 FROM reply_like WHERE ap_id=$2\
+)";
+
+fn unverified_inbound_announce_actor(body: &str) -> Option<String> {
+    /*
+        This is only an early skip check. It never trusts the activity for
+        ingestion; it only avoids expensive signature verification for
+        Announce traffic from community actors nobody local follows.
+    */
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+
+    if !value_type_is(&value, "Announce") {
+        return None;
+    }
+
+    value.get("actor")?.as_str().map(ToOwned::to_owned)
+}
+
+fn activity_object_id(value: &serde_json::Value) -> Option<&str> {
+    match value.get("object")? {
+        serde_json::Value::String(id) => Some(id),
+        serde_json::Value::Object(object) => object.get("id")?.as_str(),
+        _ => None,
+    }
+}
+
+fn unverified_remote_delete_activity(
+    body: &str,
+    host_url_apub: &crate::BaseURL,
+) -> Option<(String, String)> {
+    /*
+        Remote profile cleanup often arrives as Delete activities for actors
+        and posts this instance has never seen. If neither the actor nor object
+        is known, and the object is not one of our local ids, the activity
+        cannot change local state. Skipping it here avoids repeated remote key
+        fetches for actors that may already be Gone.
+    */
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+
+    if !value_type_is(&value, "Delete") {
+        return None;
+    }
+
+    let actor = value.get("actor")?.as_str()?;
+    let object_id = activity_object_id(&value)?;
+
+    if crate::apub_util::LocalObjectRef::try_from_uri(object_id, host_url_apub).is_some() {
+        return None;
+    }
+
+    Some((actor.to_owned(), object_id.to_owned()))
 }
 
 #[async_trait]
@@ -9258,163 +9470,11 @@ pub struct SendNotification {
 impl TaskDef for SendNotification {
     const KIND: &'static str = "send_notification";
 
-    async fn perform(self, ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> {
-        enum NotificationSendInfo<'a> {
-            PostReply {
-                href: crate::BaseURL,
-                reply_content: &'a str,
-                post_title: &'a str,
-            },
-            ReplyReply {
-                href: crate::BaseURL,
-                reply_content: &'a str,
-                post_title: &'a str,
-            },
-            UserFollow {
-                href: crate::BaseURL,
-                username: &'a str,
-            },
-        }
-
-        let db = ctx.db_pool.get().await?;
-
-        let row = db.query_one("SELECT notification.kind, notification.to_user, reply.id, reply.content_text, reply.content_markdown, reply.content_html, parent_post.title, notification_actor.id, notification_actor.username FROM notification LEFT OUTER JOIN reply ON (reply.id = notification.reply) LEFT OUTER JOIN post AS parent_post ON (parent_post.id = notification.parent_post) LEFT OUTER JOIN person AS notification_actor ON (notification_actor.id = notification.from_user) WHERE notification.id=$1", &[&self.notification]).await?;
-
-        let user = UserLocalID(row.get(1));
-
-        let subscriptions_rows = db
-            .query(
-                "SELECT id, language FROM person_notification_subscription WHERE person=$1",
-                &[&user],
-            )
-            .await?;
-
-        let build_content = |info| -> Vec<_> {
-            subscriptions_rows
-                .into_iter()
-                .map(|row| {
-                    let id = NotificationSubscriptionID(row.get(0));
-                    let language_req: Option<&str> = row.get(1);
-
-                    let lang = crate::get_lang_for_header(language_req);
-
-                    match &info {
-                        NotificationSendInfo::PostReply {
-                            href,
-                            reply_content,
-                            post_title,
-                        } => SendNotificationForSubscription {
-                            subscription: id,
-                            href: Cow::Owned(href.to_string()),
-                            title: Cow::Owned(
-                                lang.tr(&lang::notification_title_post_reply(*post_title))
-                                    .into_owned(),
-                            ),
-                            body: Cow::Borrowed(reply_content),
-                        },
-                        NotificationSendInfo::ReplyReply {
-                            href,
-                            reply_content,
-                            post_title,
-                        } => SendNotificationForSubscription {
-                            subscription: id,
-                            href: Cow::Owned(href.to_string()),
-                            title: Cow::Owned(
-                                lang.tr(&lang::notification_title_reply_reply(*post_title))
-                                    .into_owned(),
-                            ),
-                            body: Cow::Borrowed(reply_content),
-                        },
-                        NotificationSendInfo::UserFollow { href, username } => {
-                            SendNotificationForSubscription {
-                                subscription: id,
-                                href: Cow::Owned(href.to_string()),
-                                title: Cow::Owned(
-                                    lang.tr(&lang::notification_title_user_follow())
-                                        .into_owned(),
-                                ),
-                                body: Cow::Owned(
-                                    lang.tr(&lang::notification_body_user_follow(*username))
-                                        .into_owned(),
-                                ),
-                            }
-                        }
-                    }
-                })
-                .collect()
-        };
-
-        let new_tasks = match row.get(0) {
-            "post_reply" => {
-                let content = row
-                    .get::<_, Option<&str>>(3)
-                    .or_else(|| row.get(4))
-                    .or_else(|| row.get(5));
-
-                if let Some(content) = content {
-                    let id = CommentLocalID(row.get(2));
-
-                    let post_title: Option<&str> = row.get(6);
-                    if let Some(post_title) = post_title {
-                        Some(build_content(NotificationSendInfo::PostReply {
-                            href: crate::apub_util::LocalObjectRef::Comment(id)
-                                .to_local_uri(&ctx.host_url_apub),
-                            reply_content: content,
-                            post_title: post_title,
-                        }))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            "reply_reply" => {
-                let content = row
-                    .get::<_, Option<&str>>(3)
-                    .or_else(|| row.get(4))
-                    .or_else(|| row.get(5));
-
-                if let Some(content) = content {
-                    let id = CommentLocalID(row.get(2));
-
-                    let post_title: Option<&str> = row.get(6);
-                    if let Some(post_title) = post_title {
-                        Some(build_content(NotificationSendInfo::ReplyReply {
-                            href: crate::apub_util::LocalObjectRef::Comment(id)
-                                .to_local_uri(&ctx.host_url_apub),
-                            reply_content: content,
-                            post_title: post_title,
-                        }))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            "user_follow" => {
-                let follower_id = row.get::<_, Option<i64>>(7).map(UserLocalID);
-                let username: Option<&str> = row.get(8);
-
-                match (follower_id, username) {
-                    (Some(follower_id), Some(username)) => {
-                        Some(build_content(NotificationSendInfo::UserFollow {
-                            href: crate::apub_util::LocalObjectRef::User(follower_id)
-                                .to_local_uri(&ctx.host_url_apub),
-                            username,
-                        }))
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        };
-
-        if let Some(new_tasks) = new_tasks {
-            ctx.enqueue_tasks(&new_tasks).await?;
-        }
-
+    async fn perform(self, _ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> {
+        log::debug!(
+            "Browser push is disabled; leaving notification {} for in-site display only",
+            self.notification.raw()
+        );
         Ok(())
     }
 }
@@ -9431,41 +9491,11 @@ pub struct SendNotificationForSubscription<'a> {
 impl TaskDef for SendNotificationForSubscription<'_> {
     const KIND: &'static str = "send_notification_for_subscription";
 
-    async fn perform(self, ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> {
-        let db = ctx.db_pool.get().await?;
-
-        let row = db.query_one("SELECT endpoint, p256dh_key, auth_key FROM person_notification_subscription WHERE id=$1", &[&self.subscription]).await?;
-        let endpoint: &str = row.get(0);
-        let p256dh_key: &str = row.get(1);
-        let auth_key: &str = row.get(2);
-
-        let payload = serde_json::json!({
-            "title": (self.title),
-            "body": (self.body),
-            "href": (self.href),
-        });
-        let payload = serde_json::to_vec(&payload)?;
-
-        let subscription = web_push::SubscriptionInfo::new(endpoint, p256dh_key, auth_key);
-
-        let mut builder = web_push::WebPushMessageBuilder::new(&subscription);
-        builder.set_vapid_signature(
-            ctx.vapid_signature_builder
-                .clone()
-                .add_sub_info(&subscription)
-                .build()?,
+    async fn perform(self, _ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> {
+        log::debug!(
+            "Browser push is disabled; skipping notification subscription {}",
+            self.subscription.raw()
         );
-        builder.set_payload(web_push::ContentEncoding::Aes128Gcm, &payload);
-
-        let message = builder.build()?;
-
-        let req = web_push::request_builder::build_request(message);
-        let res = crate::apub_util::send_http_request(&ctx.http_client, req).await?;
-        let code = res.status();
-        let body = crate::apub_util::read_http_body(res).await?;
-
-        web_push::request_builder::parse_response(code, body.to_vec())?;
-
         Ok(())
     }
 }
@@ -9483,6 +9513,37 @@ impl TaskDef for VerifyAndIngestObjectFromInbox {
     const KIND: &'static str = "verify_and_ingest_object_from_inbox";
 
     async fn perform(self, ctx: Arc<crate::BaseContext>) -> Result<(), crate::Error> {
+        let body = self.body;
+
+        if let Some(actor) = unverified_inbound_announce_actor(&body) {
+            let db = ctx.db_pool.get().await?;
+            let tracked = db
+                .query_one(INBOUND_ANNOUNCE_ACTOR_IS_TRACKED_SQL, &[&actor])
+                .await?
+                .get::<_, bool>(0);
+
+            if !tracked {
+                return Ok(());
+            }
+        }
+
+        if let Some((actor, object_id)) =
+            unverified_remote_delete_activity(&body, &ctx.host_url_apub)
+        {
+            let db = ctx.db_pool.get().await?;
+            let tracked = db
+                .query_one(
+                    INBOUND_DELETE_ACTIVITY_IS_TRACKED_SQL,
+                    &[&actor, &object_id],
+                )
+                .await?
+                .get::<_, bool>(0);
+
+            if !tracked {
+                return Ok(());
+            }
+        }
+
         /*
             Incoming signatures cover request metadata as well as the body. The
             HTTP handler stores the original method, URI, and headers so the
@@ -9499,7 +9560,6 @@ impl TaskDef for VerifyAndIngestObjectFromInbox {
             builder = builder.header(name, value);
         }
 
-        let body = self.body;
         let req = builder.body(hyper::Body::from(body.clone()))?;
         let object = match crate::apub_util::verify_incoming_object(req, &ctx).await {
             Ok(object) => object,
@@ -10161,6 +10221,11 @@ mod tests {
         );
         let gone =
             crate::Error::InternalStr("Error in remote response: {\"error\":\"Gone\"}".to_owned());
+        let cloudflare_rate_limit =
+            crate::Error::InternalStr("Error in remote response: error code: 1015".to_owned());
+        let browser_challenge = crate::Error::InternalStr(
+            "Error in remote response: <!DOCTYPE html><title>Just a moment...</title>".to_owned(),
+        );
 
         assert!(super::platform_thread_fetch_error_is_permanent(
             &nodebb_not_found
@@ -10172,6 +10237,118 @@ mod tests {
             &html_not_found
         ));
         assert!(super::platform_thread_fetch_error_is_permanent(&gone));
+        assert!(super::platform_thread_fetch_error_is_permanent(
+            &cloudflare_rate_limit
+        ));
+        assert!(super::platform_thread_fetch_error_is_permanent(
+            &browser_challenge
+        ));
+    }
+
+    #[test]
+    fn inbox_verify_can_identify_untrusted_announce_actors_for_skip_checks() {
+        let announce = r#"{
+            "type": "Announce",
+            "actor": "https://lemmy.example/c/news",
+            "object": "https://lemmy.example/post/1"
+        }"#;
+        let create = r#"{
+            "type": "Create",
+            "actor": "https://lemmy.example/u/alice",
+            "object": {"type": "Note"}
+        }"#;
+        let ambiguous_actor = r#"{
+            "type": "Announce",
+            "actor": ["https://lemmy.example/c/news"],
+            "object": "https://lemmy.example/post/1"
+        }"#;
+
+        assert_eq!(
+            super::unverified_inbound_announce_actor(announce).as_deref(),
+            Some("https://lemmy.example/c/news")
+        );
+        assert_eq!(super::unverified_inbound_announce_actor(create), None);
+        assert_eq!(
+            super::unverified_inbound_announce_actor(ambiguous_actor),
+            None
+        );
+    }
+
+    #[test]
+    fn inbox_announce_skip_check_requires_accepted_local_follow() {
+        let sql = super::INBOUND_ANNOUNCE_ACTOR_IS_TRACKED_SQL;
+
+        assert!(sql.contains("FROM community"));
+        assert!(sql.contains("INNER JOIN community_follow"));
+        assert!(sql.contains("community_follow.local"));
+        assert!(sql.contains("community_follow.accepted"));
+        assert!(sql.contains("NOT community.deleted"));
+        assert!(sql.contains("community.ap_id=$1"));
+    }
+
+    #[test]
+    fn inbox_verify_can_identify_unknown_remote_deletes_for_skip_checks() {
+        let host_url_apub = "https://lotide.example/apub".parse().unwrap();
+        let remote_delete = r#"{
+            "type": "Delete",
+            "actor": "https://mastodon.example/users/alice",
+            "object": "https://mastodon.example/users/alice/statuses/1"
+        }"#;
+        let local_delete = r#"{
+            "type": "Delete",
+            "actor": "https://mastodon.example/users/alice",
+            "object": "https://lotide.example/apub/posts/1"
+        }"#;
+        let embedded_object_delete = r#"{
+            "type": "Delete",
+            "actor": "https://mastodon.example/users/alice",
+            "object": {
+                "id": "https://mastodon.example/users/alice/statuses/2",
+                "type": "Tombstone"
+            }
+        }"#;
+        let ambiguous_actor = r#"{
+            "type": "Delete",
+            "actor": ["https://mastodon.example/users/alice"],
+            "object": "https://mastodon.example/users/alice/statuses/1"
+        }"#;
+
+        assert_eq!(
+            super::unverified_remote_delete_activity(remote_delete, &host_url_apub),
+            Some((
+                "https://mastodon.example/users/alice".to_owned(),
+                "https://mastodon.example/users/alice/statuses/1".to_owned()
+            ))
+        );
+        assert_eq!(
+            super::unverified_remote_delete_activity(embedded_object_delete, &host_url_apub),
+            Some((
+                "https://mastodon.example/users/alice".to_owned(),
+                "https://mastodon.example/users/alice/statuses/2".to_owned()
+            ))
+        );
+        assert_eq!(
+            super::unverified_remote_delete_activity(local_delete, &host_url_apub),
+            None
+        );
+        assert_eq!(
+            super::unverified_remote_delete_activity(ambiguous_actor, &host_url_apub),
+            None
+        );
+    }
+
+    #[test]
+    fn inbox_delete_skip_check_keeps_known_actors_and_objects() {
+        let sql = super::INBOUND_DELETE_ACTIVITY_IS_TRACKED_SQL;
+
+        assert!(sql.contains("FROM person"));
+        assert!(sql.contains("FROM community"));
+        assert!(sql.contains("FROM post"));
+        assert!(sql.contains("FROM reply"));
+        assert!(sql.contains("FROM post_like"));
+        assert!(sql.contains("FROM reply_like"));
+        assert!(sql.contains("ap_id=$1"));
+        assert!(sql.contains("ap_id=$2"));
     }
 
     #[test]
@@ -10234,6 +10411,17 @@ mod tests {
         assert!(sql.contains("kind=$1"));
         assert!(sql.contains("state IN ('pending', 'running')"));
         assert!(sql.contains("params->>'post_id'=$4"));
+    }
+
+    #[test]
+    fn platform_thread_fetch_caps_pending_work_by_host() {
+        let sql = super::ENQUEUE_PLATFORM_POST_THREAD_FETCH_SQL;
+
+        assert!(sql.contains("params->>'post_ap_id'"));
+        assert!(sql.contains("substring(params->>'post_ap_id' from '^https?://([^/]+)'"));
+        assert!(sql.contains("'^www\\.'"));
+        assert!(sql.contains("=$5"));
+        assert!(sql.contains("< $6"));
     }
 
     #[test]
@@ -10652,6 +10840,15 @@ mod tests {
                 "apId": "AskMbin@thebrainbin.org",
                 "apProfileId": "https://thebrainbin.org/m/AskMbin",
                 "entryCount": 22
+            }, {
+                "name": "EmptyMbin",
+                "apId": "EmptyMbin@thebrainbin.org",
+                "apProfileId": "https://thebrainbin.org/m/EmptyMbin",
+                "postCount": 0
+            }, {
+                "name": "random",
+                "apProfileId": "https://thebrainbin.org/m/random",
+                "postCount": 512043
             }]
         });
         let lotide_communities = super::parse_discovered_communities_from_json(&lotide).unwrap();
@@ -10663,12 +10860,14 @@ mod tests {
             lotide_communities[0].outbox.as_ref().map(url::Url::as_str),
             Some("https://narwhal.city/communities/13/outbox")
         );
-        assert_eq!(mbin_communities.len(), 1);
+        assert_eq!(mbin_communities.len(), 2);
         assert_eq!(
             mbin_communities[0].ap_id.as_str(),
             "https://thebrainbin.org/m/AskMbin"
         );
         assert_eq!(mbin_communities[0].post_count, Some(22));
+        assert_eq!(mbin_communities[1].name, "random");
+        assert_eq!(mbin_communities[1].post_count, Some(512043));
     }
 
     #[test]
@@ -10927,12 +11126,13 @@ mod tests {
             <p>@homelab@fedigroups.social</p>
             <p>@homeassistant@fedigroups.social</p>
             <a href="https://fedigroups.social/@photography">@photography</a>
+            <a href="https://fedigroups.social/users/actuallyadhd">Actually ADHD</a>
             <p>@homelab@fedigroups.social</p>
         "#;
         let communities =
             super::parse_fedigroups_directory_communities_from_html(html, "fedigroups.social");
 
-        assert_eq!(communities.len(), 3);
+        assert_eq!(communities.len(), 4);
         assert_eq!(communities[0].name, "homelab");
         assert_eq!(
             communities[0].ap_id.as_str(),
@@ -10950,6 +11150,10 @@ mod tests {
             communities[2].ap_id.as_str(),
             "https://fedigroups.social/users/photography"
         );
+        assert_eq!(
+            communities[3].ap_id.as_str(),
+            "https://fedigroups.social/users/actuallyadhd"
+        );
     }
 
     #[test]
@@ -10966,7 +11170,7 @@ mod tests {
                 <div class="contact-entry-details contact-entry-url">news@forum.friendi.ca</div>
             </div>
             <div class="contact-entry-wrapper">
-                <a href="https://forum.friendi.ca/profile/helpers">Friendica Support</a>
+                <a href="/profile/helpers">Friendica Support</a>
                 <small class="contact-entry-details" id="contact-entry-accounttype-349">(Group)</small>
                 <div class="contact-entry-details contact-entry-url">helpers@forum.friendi.ca</div>
             </div>
@@ -11313,6 +11517,10 @@ mod tests {
         assert_eq!(super::collection_discovery_post_count(&page), Some(2));
         assert_eq!(super::collection_discovery_post_count(&empty_page), Some(0));
         assert_eq!(super::collection_discovery_post_count(&unknown), None);
+        assert_eq!(super::discovery_count_if_active(Some(2)), Some(2));
+        assert_eq!(super::discovery_count_if_active(Some(1)), None);
+        assert_eq!(super::discovery_count_if_active(Some(0)), None);
+        assert_eq!(super::discovery_count_if_active(None), None);
     }
 
     #[test]
@@ -11444,6 +11652,44 @@ mod tests {
     }
 
     #[test]
+    fn community_discovery_failure_preserves_last_known_rows() {
+        let sql = super::MARK_COMMUNITY_DISCOVERY_FAILURE_SQL;
+
+        assert!(sql.contains("INSERT INTO community_discovery_server"));
+        assert!(sql.contains("failed_checks=community_discovery_server.failed_checks + 1"));
+        assert!(sql.contains("WHEN $3::BOOLEAN"));
+        assert!(sql.contains("last_success > current_timestamp - INTERVAL '7 DAYS'"));
+        assert!(sql.contains("ELSE community_discovery_server.failed_checks + 1 < 3"));
+        assert!(!sql.contains("UPDATE community_discovery"));
+        assert!(!sql.contains("SET active=FALSE"));
+    }
+
+    #[test]
+    fn community_discovery_classifies_only_transport_failures_as_transient() {
+        assert!(super::community_discovery_failure_is_transient(
+            "Community discovery timed out"
+        ));
+        assert!(super::community_discovery_failure_is_transient(
+            "Remote returned 502 Bad Gateway"
+        ));
+        assert!(super::community_discovery_failure_is_transient(
+            "DNS lookup failed"
+        ));
+        assert!(super::community_discovery_failure_is_transient(
+            "TLS certificate verification failed"
+        ));
+        assert!(!super::community_discovery_failure_is_transient(
+            "No supported public community-list endpoint returned data"
+        ));
+        assert!(!super::community_discovery_failure_is_transient(
+            "discourse did not return a recognized community list shape"
+        ));
+        assert!(!super::community_discovery_failure_is_transient(
+            "friendica-directory returned no group candidates"
+        ));
+    }
+
+    #[test]
     fn community_host_interaction_probe_normalizes_www_hosts() {
         assert_eq!(
             super::normalize_probe_host(" WWW.Example.Org. ").as_deref(),
@@ -11487,20 +11733,20 @@ mod tests {
     #[test]
     fn public_federation_policy_matches_exact_and_wildcard_domains() {
         assert!(super::federation_policy_domain_matches_local(
-            "lotide.example.org",
-            "lotide.example.org"
+            "lotide.example",
+            "lotide.example"
         ));
         assert!(super::federation_policy_domain_matches_local(
-            "*.example.org",
-            "lotide.example.org"
+            "*.example",
+            "lotide.example"
         ));
         assert!(!super::federation_policy_domain_matches_local(
-            "example.org",
-            "lotide.example.org"
+            "example",
+            "lotide.example"
         ));
         assert!(!super::federation_policy_domain_matches_local(
-            "lemmy.example.org",
-            "lotide.example.org"
+            "lemmy.example",
+            "lotide.example"
         ));
     }
 
@@ -11509,17 +11755,17 @@ mod tests {
         let value = serde_json::json!({
             "federated_instances": {
                 "linked": [
-                    { "domain": "lotide.example.org" }
+                    { "domain": "lotide.example" }
                 ],
                 "allowed": [],
                 "blocked": [
-                    { "domain": "lotide.example.org" }
+                    { "domain": "lotide.example" }
                 ]
             }
         });
 
         assert_eq!(
-            super::public_federation_relation_from_lemmy_value(&value, "lotide.example.org"),
+            super::public_federation_relation_from_lemmy_value(&value, "lotide.example"),
             super::PublicFederationRelation::Blocked
         );
     }
@@ -11529,7 +11775,7 @@ mod tests {
         let linked = serde_json::json!({
             "federated_instances": {
                 "linked": [
-                    { "domain": "lotide.example.org" }
+                    { "domain": "lotide.example" }
                 ],
                 "allowed": [],
                 "blocked": []
@@ -11539,7 +11785,7 @@ mod tests {
             "federated_instances": {
                 "linked": [],
                 "allowed": [
-                    { "domain": "lotide.example.org" }
+                    { "domain": "lotide.example" }
                 ],
                 "blocked": []
             }
@@ -11547,7 +11793,7 @@ mod tests {
         let not_listed = serde_json::json!({
             "federated_instances": {
                 "linked": [
-                    { "domain": "lemmy.example.org" }
+                    { "domain": "lemmy.example" }
                 ],
                 "allowed": [],
                 "blocked": []
@@ -11555,15 +11801,15 @@ mod tests {
         });
 
         assert_eq!(
-            super::public_federation_relation_from_lemmy_value(&linked, "lotide.example.org"),
+            super::public_federation_relation_from_lemmy_value(&linked, "lotide.example"),
             super::PublicFederationRelation::Linked
         );
         assert_eq!(
-            super::public_federation_relation_from_lemmy_value(&allowed, "lotide.example.org"),
+            super::public_federation_relation_from_lemmy_value(&allowed, "lotide.example"),
             super::PublicFederationRelation::Allowed
         );
         assert_eq!(
-            super::public_federation_relation_from_lemmy_value(&not_listed, "lotide.example.org"),
+            super::public_federation_relation_from_lemmy_value(&not_listed, "lotide.example"),
             super::PublicFederationRelation::NotListed
         );
     }
@@ -11594,7 +11840,7 @@ mod tests {
         ));
         let ambiguous_domain_block =
             super::community_follow_rejection_reason(&crate::Error::InternalStr(
-                "Error in remote response: {\"error\":\"unknown\",\"message\":\"Domain \\\"lotide.example.org\\\" is blocked\"}".to_owned(),
+                "Error in remote response: {\"error\":\"unknown\",\"message\":\"Domain \\\"lotide.example\\\" is blocked\"}".to_owned(),
             ));
         let forbidden = super::community_follow_rejection_reason(&crate::Error::InternalStrStatic(
             "Error in remote response: Forbidden",

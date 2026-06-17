@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS task_completed_inbox_payload_compaction_idx;

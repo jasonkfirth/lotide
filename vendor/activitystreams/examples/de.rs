@@ -42,22 +42,25 @@ fn main() -> Result<(), Error> {
     }"#;
 
     let page: ApObject<Page> = serde_json::from_str(page_json)?;
-    println!("{:#?}", page);
+    println!("{page:#?}");
     let mut collection: ApObject<OrderedCollection> = serde_json::from_str(collection_json)?;
-    println!("{:#?}", collection);
+    println!("{collection:#?}");
 
     let v: Vec<ApObject<Page>> = collection
         .take_items()
         .into_iter()
-        .flat_map(|o| o.into_iter())
-        .filter_map(|any_base| any_base.take_base())
-        .map(|base| base.solidify().and_then(|o| o.extend()))
+        .flat_map(IntoIterator::into_iter)
+        .filter_map(activitystreams::base::AnyBase::take_base)
+        .map(|base| {
+            base.solidify()
+                .and_then(activitystreams::base::Base::extend)
+        })
         .collect::<Result<Vec<_>, _>>()?;
 
-    println!("{:#?}", v);
+    println!("{v:#?}");
     let v = v
         .into_iter()
-        .map(|o| o.into_any_base())
+        .map(activitystreams::base::ExtendsExt::into_any_base)
         .collect::<Result<Vec<_>, _>>()?;
 
     collection.set_many_items(v);
