@@ -13,116 +13,252 @@
 				"description": "What to do with inline images in HTML content. Defaults to `convert_to_links`.",
 				"schema": {
 					"type": "string",
-					"enum": ["remove", "preserve", "convert_to_links"]
+					"enum": [
+						"remove",
+						"preserve",
+						"convert_to_links"
+					]
 				}
 			}
 		},
 		"schemas": {
 			"PathUserID": {
 				"oneOf": [
-					{"type": "string", "enum": ["~me"]},
-					{"type": "integer"}
+					{
+						"type": "string",
+						"enum": [
+							"~me"
+						]
+					},
+					{
+						"type": "integer"
+					}
 				]
 			},
 			"SortType": {
 				"type": "string",
-				"enum": ["hot", "new"]
+				"enum": [
+					"hot",
+					"new"
+				]
 			},
 			"Content": {
 				"type": "object",
-				"required": ["content_text", "content_markdown", "content_html"],
+				"required": [
+					"content_text",
+					"content_markdown",
+					"content_html"
+				],
 				"properties": {
-					"content_text": {"type": "string"},
-					"content_markdown": {"type": "string"},
-					"content_html": {"type": "string"}
+					"content_text": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_markdown": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_html": {
+						"type": "string",
+						"nullable": true
+					}
 				}
 			},
 			"LoginUserInfo": {
 				"type": "object",
-				"required": ["id", "username", "is_site_admin", "has_unread_notifications", "has_pending_moderation_actions"],
+				"required": [
+					"id",
+					"username",
+					"is_site_admin",
+					"has_unread_notifications",
+					"has_pending_moderation_actions"
+				],
 				"properties": {
-					"id": {"type": "integer"},
-					"username": {"type": "string"},
-					"is_site_admin": {"type": "boolean"},
-					"has_unread_notifications": {"type": "boolean"},
-					"has_pending_moderation_actions": {"type": "boolean"}
+					"id": {
+						"type": "integer"
+					},
+					"username": {
+						"type": "string"
+					},
+					"is_site_admin": {
+						"type": "boolean"
+					},
+					"has_unread_notifications": {
+						"type": "boolean"
+					},
+					"has_pending_moderation_actions": {
+						"type": "boolean"
+					}
 				}
 			},
 			"LoginInfo": {
 				"type": "object",
-				"required": ["user", "permissions"],
+				"required": [
+					"user",
+					"permissions"
+				],
 				"properties": {
 					"user": {
 						"$ref": "#/components/schemas/LoginUserInfo"
 					},
 					"permissions": {
 						"type": "object",
-						"required": ["create_community", "create_invitation"],
+						"required": [
+							"create_community",
+							"create_invitation"
+						],
 						"properties": {
-							"create_community": {"$ref": "#/components/schemas/PermissionInfo"},
-							"create_invitation": {"$ref": "#/components/schemas/PermissionInfo"}
+							"create_community": {
+								"$ref": "#/components/schemas/PermissionInfo"
+							},
+							"create_invitation": {
+								"$ref": "#/components/schemas/PermissionInfo"
+							}
 						}
 					}
 				}
 			},
 			"MinimalCommentInfo": {
 				"type": "object",
-				"required": ["id", "remote_url"],
+				"required": [
+					"id",
+					"remote_url"
+				],
 				"properties": {
-					"id": {"type": "integer"},
-					"remote_url": {"type": "string", "nullable": true},
-					"content_text": {"type": "string"},
-					"content_html": {"type": "string"}
+					"id": {
+						"type": "integer"
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_text": {
+						"type": "string"
+					},
+					"content_html": {
+						"type": "string"
+					}
 				}
 			},
 			"MinimalCommunityInfo": {
 				"type": "object",
-				"required": ["id", "username", "local", "host", "remote_url", "deleted"],
+				"required": [
+					"id",
+					"username",
+					"local",
+					"host",
+					"remote_url",
+					"deleted"
+				],
 				"properties": {
-					"id": {"type": "integer"},
-					"name": {"type": "string"},
-					"local": {"type": "boolean"},
-					"host": {"type": "string"},
-					"remote_url": {"type": "string", "nullable": true},
-					"deleted": {"type": "boolean"}
+					"id": {
+						"type": "integer"
+					},
+					"name": {
+						"type": "string"
+					},
+					"local": {
+						"type": "boolean"
+					},
+					"host": {
+						"type": "string"
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"deleted": {
+						"type": "boolean"
+					}
 				}
 			},
 			"MinimalPostInfo": {
 				"type": "object",
-				"required": ["id", "title", "remote_url", "sensitive"],
+				"required": [
+					"id",
+					"title",
+					"remote_url",
+					"sensitive"
+				],
 				"properties": {
-					"id": {"type": "integer"},
-					"title": {"type": "string"},
-					"remote_url": {"type": "string", "nullable": true},
-					"sensitive": {"type": "boolean"}
+					"id": {
+						"type": "integer"
+					},
+					"title": {
+						"type": "string"
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"sensitive": {
+						"type": "boolean"
+					}
 				}
 			},
 			"NullableMinimalPostInfo": {
 				"type": "object",
 				"nullable": true,
-				"required": ["id", "title", "remote_url"],
+				"required": [
+					"id",
+					"title",
+					"remote_url"
+				],
 				"properties": {
-					"id": {"type": "integer"},
-					"title": {"type": "string"},
-					"remote_url": {"type": "string", "nullable": true},
-					"sensitive": {"type": "boolean"}
+					"id": {
+						"type": "integer"
+					},
+					"title": {
+						"type": "string"
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"sensitive": {
+						"type": "boolean"
+					}
 				}
 			},
 			"MinimalUserInfo": {
 				"type": "object",
-				"required": ["id", "username", "local", "host", "remote_url", "is_bot"],
+				"required": [
+					"id",
+					"username",
+					"local",
+					"host",
+					"remote_url",
+					"is_bot"
+				],
 				"properties": {
-					"id": {"type": "integer"},
-					"username": {"type": "string"},
-					"local": {"type": "boolean"},
-					"host": {"type": "string"},
-					"remote_url": {"type": "string", "nullable": true},
-					"is_bot": {"type": "boolean"},
+					"id": {
+						"type": "integer"
+					},
+					"username": {
+						"type": "string"
+					},
+					"local": {
+						"type": "boolean"
+					},
+					"host": {
+						"type": "string"
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"is_bot": {
+						"type": "boolean"
+					},
 					"avatar": {
 						"type": "object",
-						"required": ["url"],
+						"required": [
+							"url"
+						],
 						"properties": {
-							"url": {"type": "string"}
+							"url": {
+								"type": "string"
+							}
 						}
 					}
 				}
@@ -130,56 +266,111 @@
 			"NullableMinimalUserInfo": {
 				"type": "object",
 				"nullable": true,
-				"required": ["id", "username", "local", "host", "remote_url"],
+				"required": [
+					"id",
+					"username",
+					"local",
+					"host",
+					"remote_url"
+				],
 				"properties": {
-					"id": {"type": "integer"},
-					"username": {"type": "string"},
-					"local": {"type": "boolean"},
-					"host": {"type": "string"},
-					"remote_url": {"type": "string", "nullable": true},
+					"id": {
+						"type": "integer"
+					},
+					"username": {
+						"type": "string"
+					},
+					"local": {
+						"type": "boolean"
+					},
+					"host": {
+						"type": "string"
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					},
 					"avatar": {
 						"type": "object",
-						"required": ["url"],
+						"required": [
+							"url"
+						],
 						"properties": {
-							"url": {"type": "string"}
+							"url": {
+								"type": "string"
+							}
 						}
 					}
 				}
 			},
 			"UserInfo": {
-				"allOf": [{"$ref": "#/components/schemas/MinimalUserInfo"}],
+				"allOf": [
+					{
+						"$ref": "#/components/schemas/MinimalUserInfo"
+					}
+				],
 				"type": "object",
-				"required": ["description"],
+				"required": [
+					"description"
+				],
 				"properties": {
 					"description": {
 						"$ref": "#/components/schemas/Content"
 					},
 					"your_note": {
-						"type": "string",
+						"type": "object",
 						"nullable": true,
-						"description": "Private note about this user written by you"
+						"required": [
+							"content_text"
+						],
+						"properties": {
+							"content_text": {
+								"type": "string"
+							}
+						},
+						"description": "Private note about this user written by you. Only returned when include_your=true."
 					},
 					"suspended": {
 						"type": "boolean",
 						"description": "Whether the user is suspended"
+					},
+					"your_follow": {
+						"allOf": [
+							{
+								"$ref": "#/components/schemas/YourFollowInfo"
+							}
+						],
+						"nullable": true,
+						"description": "Your follow state for this user. Only returned when include_your=true."
 					}
 				}
 			},
 			"CommunityInfo": {
-				"allOf": [{"$ref": "#/components/schemas/MinimalCommunityInfo"}],
+				"allOf": [
+					{
+						"$ref": "#/components/schemas/MinimalCommunityInfo"
+					}
+				],
 				"type": "object",
-				"required": ["description", "feeds"],
+				"required": [
+					"description",
+					"feeds"
+				],
 				"properties": {
 					"description": {
 						"$ref": "#/components/schemas/Content"
 					},
 					"feeds": {
 						"type": "object",
-						"required": ["atom"],
+						"required": [
+							"atom"
+						],
 						"properties": {
 							"atom": {
 								"type": "object",
-								"required": ["new"],
+								"required": [
+									"new"
+								],
 								"properties": {
 									"new": {
 										"type": "string"
@@ -188,11 +379,15 @@
 							}
 						}
 					},
-					"you_are_moderator": {"type": "boolean"},
+					"you_are_moderator": {
+						"type": "boolean"
+					},
 					"your_follow": {
 						"type": "object",
 						"nullable": true,
-						"required": ["accepted"],
+						"required": [
+							"accepted"
+						],
 						"properties": {
 							"accepted": {
 								"type": "boolean",
@@ -208,19 +403,44 @@
 			},
 			"PermissionInfo": {
 				"type": "object",
-				"required": ["allowed"],
+				"required": [
+					"allowed"
+				],
 				"properties": {
-					"allowed": {"type": "boolean"}
+					"allowed": {
+						"type": "boolean"
+					}
 				}
 			},
 			"SomePostInfo": {
 				"type": "object",
-				"required": ["id", "title", "created", "community", "score", "sticky", "remote_url", "content_text", "content_html", "content_markdown", "sensitive"],
+				"required": [
+					"id",
+					"title",
+					"created",
+					"community",
+					"score",
+					"sticky",
+					"remote_url",
+					"content_text",
+					"content_html",
+					"content_markdown",
+					"sensitive"
+				],
 				"properties": {
-					"id": {"type": "integer"},
-					"title": {"type": "string"},
-					"remote_url": {"type": "string", "nullable": true},
-					"href": {"type": "string"},
+					"id": {
+						"type": "integer"
+					},
+					"title": {
+						"type": "string"
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"href": {
+						"type": "string"
+					},
 					"content_text": {
 						"nullable": true,
 						"type": "string",
@@ -232,73 +452,168 @@
 						"description": "Content in HTML form."
 					},
 					"author": {
-						"$ref": "#/components/schemas/MinimalUserInfo"
+						"allOf": [
+							{
+								"$ref": "#/components/schemas/MinimalUserInfo"
+							}
+						],
+						"nullable": true
 					},
-					"created": {"type": "string", "format": "date-time"},
+					"created": {
+						"type": "string",
+						"format": "date-time"
+					},
 					"community": {
 						"type": "object",
-						"required": ["id", "name", "local", "host", "remote_url"],
+						"required": [
+							"id",
+							"name",
+							"local",
+							"host",
+							"remote_url",
+							"deleted"
+						],
 						"properties": {
-							"id": {"type": "integer"},
-							"name": {"type": "string"},
-							"local": {"type": "boolean"},
-							"host": {"type": "string"},
-							"remote_url": {"type": "string", "nullable": true}
+							"id": {
+								"type": "integer"
+							},
+							"name": {
+								"type": "string"
+							},
+							"local": {
+								"type": "boolean"
+							},
+							"host": {
+								"type": "string"
+							},
+							"remote_url": {
+								"type": "string",
+								"nullable": true
+							},
+							"deleted": {
+								"type": "boolean"
+							}
 						}
 					},
-					"score": {"type": "integer"},
-					"sticky": {"type": "boolean"},
-					"your_vote": {"$ref": "#/components/schemas/YourVote"},
-					"content_markdown": {"type": "string", "nullable": true},
-					"sensitive": {"type": "boolean"}
+					"score": {
+						"type": "integer"
+					},
+					"sticky": {
+						"type": "boolean"
+					},
+					"your_vote": {
+						"$ref": "#/components/schemas/YourVote"
+					},
+					"content_markdown": {
+						"type": "string",
+						"nullable": true
+					},
+					"sensitive": {
+						"type": "boolean"
+					},
+					"federation_status": {
+						"$ref": "#/components/schemas/FederationStatus"
+					}
 				}
 			},
 			"PostListPost": {
 				"allOf": [
-					{"$ref": "#/components/schemas/SomePostInfo"},
+					{
+						"$ref": "#/components/schemas/SomePostInfo"
+					},
 					{
 						"type": "object",
-						"required": ["replies_count_total"],
+						"required": [
+							"replies_count_total"
+						],
 						"properties": {
-							"replies_count_total": {"type": "integer"}
+							"replies_count_total": {
+								"type": "integer"
+							}
 						}
 					}
 				]
 			},
 			"PostCommentInfo": {
 				"type": "object",
-				"required": ["id", "content_text", "content_markdown", "content_html", "sensitive", "author", "created", "deleted", "replies", "attachments", "local", "remote_url"],
+				"required": [
+					"id",
+					"content_text",
+					"content_markdown",
+					"content_html",
+					"sensitive",
+					"author",
+					"created",
+					"deleted",
+					"replies",
+					"attachments",
+					"local",
+					"remote_url",
+					"score"
+				],
 				"properties": {
-					"id": {"type": "integer"},
-					"remote_url": {"type": "string", "nullable": true},
-					"content_text": {"type": "string", "nullable": true},
-					"content_markdown": {"type": "string", "nullable": true},
-					"content_html": {"type": "string", "nullable": true},
-					"sensitive": {"type": "boolean"},
+					"id": {
+						"type": "integer"
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_text": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_markdown": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_html": {
+						"type": "string",
+						"nullable": true
+					},
+					"sensitive": {
+						"type": "boolean"
+					},
 					"attachments": {
 						"type": "array",
 						"items": {
 							"type": "object",
-							"required": ["url"],
+							"required": [
+								"url"
+							],
 							"properties": {
-								"url": {"type": "string"}
+								"url": {
+									"type": "string"
+								}
 							}
 						}
 					},
 					"author": {
 						"$ref": "#/components/schemas/NullableMinimalUserInfo"
 					},
-					"created": {"type": "string", "format": "date-time"},
-					"deleted": {"type": "boolean"},
-					"local": {"type": "boolean"},
+					"created": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"deleted": {
+						"type": "boolean"
+					},
+					"local": {
+						"type": "boolean"
+					},
 					"replies": {
 						"type": "object",
 						"nullable": true,
-						"required": ["items", "next_page"],
+						"required": [
+							"items",
+							"next_page"
+						],
 						"properties": {
 							"items": {
 								"type": "array",
-								"items": {"$ref": "#/components/schemas/PostCommentInfo"}
+								"items": {
+									"$ref": "#/components/schemas/PostCommentInfo"
+								}
 							},
 							"next_page": {
 								"type": "string",
@@ -307,13 +622,1627 @@
 						},
 						"description": "If null, there are replies to this comment but are omitted due to depth limits. Otherwise, this contains a list of replies. If next_page is not null, some replies have been omitted and can be accessed with pagination."
 					},
-					"your_vote": {"$ref": "#/components/schemas/YourVote"}
+					"your_vote": {
+						"$ref": "#/components/schemas/YourVote"
+					},
+					"score": {
+						"type": "integer"
+					},
+					"federation_status": {
+						"$ref": "#/components/schemas/FederationStatus"
+					}
 				}
 			},
 			"YourVote": {
 				"type": "object",
 				"nullable": true,
-				"description": "Will be null if you haven't voted, or an empty object if you have."
+				"description": "Null when you have not voted. When present, federation_status may describe delivery of a local vote to a remote target.",
+				"properties": {
+					"federation_status": {
+						"$ref": "#/components/schemas/FederationStatus"
+					}
+				}
+			},
+			"FederationStatus": {
+				"type": "string",
+				"description": "Local action delivery state for remote targets. Private messages currently report unsent, sent, or received; public objects may also report posted after readback confirmation.",
+				"enum": [
+					"unsent",
+					"sent",
+					"received",
+					"posted"
+				]
+			},
+			"YourFollowInfo": {
+				"type": "object",
+				"required": [
+					"accepted"
+				],
+				"properties": {
+					"accepted": {
+						"type": "boolean",
+						"description": "Whether the follow has been accepted by the target actor."
+					},
+					"federation_status": {
+						"$ref": "#/components/schemas/FederationStatus"
+					}
+				}
+			},
+			"PrivateMessageInfo": {
+				"type": "object",
+				"required": [
+					"id",
+					"author",
+					"recipient",
+					"created",
+					"local",
+					"remote_url",
+					"content_text",
+					"content_markdown",
+					"content_html",
+					"sensitive"
+				],
+				"properties": {
+					"id": {
+						"type": "integer"
+					},
+					"author": {
+						"$ref": "#/components/schemas/MinimalUserInfo"
+					},
+					"recipient": {
+						"$ref": "#/components/schemas/MinimalUserInfo"
+					},
+					"created": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"local": {
+						"type": "boolean"
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_text": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_markdown": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_html": {
+						"type": "string",
+						"nullable": true
+					},
+					"in_reply_to": {
+						"type": "integer",
+						"description": "Local private message id when the message is a reply in a local conversation thread."
+					},
+					"federation_status": {
+						"$ref": "#/components/schemas/FederationStatus"
+					},
+					"sensitive": {
+						"type": "boolean"
+					}
+				}
+			},
+			"PrivateMessageCreate": {
+				"type": "object",
+				"required": [
+					"recipient"
+				],
+				"properties": {
+					"recipient": {
+						"type": "integer"
+					},
+					"content_text": {
+						"type": "string"
+					},
+					"content_markdown": {
+						"type": "string"
+					},
+					"in_reply_to": {
+						"type": "integer"
+					},
+					"sensitive": {
+						"type": "boolean",
+						"default": false
+					}
+				},
+				"description": "At least one content field must be supplied. content_markdown is rendered to content_text and content_html by the server."
+			},
+			"PrivateMessageDismiss": {
+				"type": "object",
+				"required": [
+					"with_user"
+				],
+				"properties": {
+					"with_user": {
+						"type": "integer",
+						"description": "The other participant in the conversation to hide until newer activity arrives."
+					}
+				}
+			},
+			"PrivateMessageDismissResult": {
+				"type": "object",
+				"required": [
+					"dismissed"
+				],
+				"properties": {
+					"dismissed": {
+						"type": "boolean"
+					}
+				}
+			},
+			"PrivateMessageList": {
+				"type": "object",
+				"required": [
+					"items",
+					"next_page"
+				],
+				"properties": {
+					"items": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/PrivateMessageInfo"
+						}
+					},
+					"next_page": {
+						"type": "string",
+						"nullable": true
+					}
+				}
+			},
+			"NotificationInfo": {
+				"oneOf": [
+					{
+						"type": "object",
+						"required": [
+							"type",
+							"reply",
+							"post"
+						],
+						"properties": {
+							"type": {
+								"type": "string",
+								"enum": [
+									"post_reply"
+								]
+							},
+							"reply": {
+								"$ref": "#/components/schemas/PostCommentInfo"
+							},
+							"post": {
+								"$ref": "#/components/schemas/PostListPost"
+							}
+						}
+					},
+					{
+						"type": "object",
+						"required": [
+							"type",
+							"post"
+						],
+						"properties": {
+							"type": {
+								"type": "string",
+								"enum": [
+									"post_mention"
+								]
+							},
+							"post": {
+								"$ref": "#/components/schemas/PostListPost"
+							}
+						}
+					},
+					{
+						"type": "object",
+						"required": [
+							"type",
+							"reply",
+							"comment",
+							"post"
+						],
+						"properties": {
+							"type": {
+								"type": "string",
+								"enum": [
+									"comment_reply"
+								]
+							},
+							"reply": {
+								"$ref": "#/components/schemas/PostCommentInfo"
+							},
+							"comment": {
+								"$ref": "#/components/schemas/PostCommentInfo"
+							},
+							"post": {
+								"$ref": "#/components/schemas/PostListPost"
+							}
+						}
+					},
+					{
+						"type": "object",
+						"required": [
+							"type",
+							"comment",
+							"post"
+						],
+						"properties": {
+							"type": {
+								"type": "string",
+								"enum": [
+									"comment_mention"
+								]
+							},
+							"comment": {
+								"$ref": "#/components/schemas/PostCommentInfo"
+							},
+							"post": {
+								"$ref": "#/components/schemas/PostListPost"
+							}
+						}
+					},
+					{
+						"type": "object",
+						"required": [
+							"type",
+							"user"
+						],
+						"properties": {
+							"type": {
+								"type": "string",
+								"enum": [
+									"user_follow"
+								]
+							},
+							"user": {
+								"$ref": "#/components/schemas/MinimalUserInfo"
+							}
+						}
+					},
+					{
+						"type": "object",
+						"required": [
+							"type",
+							"message"
+						],
+						"properties": {
+							"type": {
+								"type": "string",
+								"enum": [
+									"private_message"
+								]
+							},
+							"message": {
+								"$ref": "#/components/schemas/PrivateMessageInfo"
+							}
+						}
+					}
+				]
+			},
+			"Notification": {
+				"allOf": [
+					{
+						"$ref": "#/components/schemas/NotificationInfo"
+					},
+					{
+						"type": "object",
+						"required": [
+							"unseen"
+						],
+						"properties": {
+							"unseen": {
+								"type": "boolean",
+								"description": "Whether this notification was generated since the last time notifications were checked."
+							}
+						}
+					}
+				]
+			},
+			"NotificationList": {
+				"type": "object",
+				"required": [
+					"items",
+					"next_page"
+				],
+				"properties": {
+					"items": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/Notification"
+						}
+					},
+					"next_page": {
+						"type": "string",
+						"nullable": true
+					}
+				}
+			},
+			"PathCollectionTargetID": {
+				"type": "integer",
+				"format": "int64"
+			},
+			"PathTaskID": {
+				"type": "integer",
+				"format": "int64"
+			},
+			"ThingLocalRef": {
+				"type": "object",
+				"description": "Local reference returned after resolving or ingesting a remote ActivityPub object.",
+				"required": [
+					"type",
+					"id"
+				],
+				"properties": {
+					"type": {
+						"type": "string",
+						"enum": [
+							"post",
+							"comment",
+							"user",
+							"community",
+							"collection_target"
+						]
+					},
+					"id": {
+						"type": "integer",
+						"format": "int64"
+					}
+				}
+			},
+			"JustURL": {
+				"type": "object",
+				"required": [
+					"url"
+				],
+				"properties": {
+					"url": {
+						"type": "string"
+					}
+				}
+			},
+			"CollectionTargetOwner": {
+				"type": "object",
+				"required": [
+					"id",
+					"remote_url"
+				],
+				"properties": {
+					"id": {
+						"type": "integer",
+						"format": "int64",
+						"nullable": true
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					}
+				}
+			},
+			"CollectionTargetPreviewItem": {
+				"type": "object",
+				"required": [
+					"id",
+					"ap_id",
+					"type",
+					"name",
+					"url",
+					"attributed_to",
+					"content_html",
+					"summary_html",
+					"image_url",
+					"published"
+				],
+				"properties": {
+					"id": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"ap_id": {
+						"type": "string"
+					},
+					"type": {
+						"type": "string",
+						"nullable": true
+					},
+					"name": {
+						"type": "string"
+					},
+					"url": {
+						"type": "string",
+						"nullable": true
+					},
+					"attributed_to": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_html": {
+						"type": "string",
+						"nullable": true
+					},
+					"summary_html": {
+						"type": "string",
+						"nullable": true
+					},
+					"image_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"published": {
+						"type": "string",
+						"format": "date-time",
+						"nullable": true
+					},
+					"your_vote": {
+						"allOf": [
+							{
+								"$ref": "#/components/schemas/YourVoteInfo"
+							}
+						],
+						"nullable": true
+					}
+				}
+			},
+			"CollectionTargetListItem": {
+				"type": "object",
+				"required": [
+					"id",
+					"type",
+					"software",
+					"name",
+					"remote_url",
+					"owner",
+					"total_items",
+					"preview_item_count",
+					"latest_preview_item",
+					"latest_preview_published",
+					"latest_preview_url",
+					"summary_excerpt"
+				],
+				"properties": {
+					"id": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"type": {
+						"type": "string"
+					},
+					"software": {
+						"type": "string"
+					},
+					"name": {
+						"type": "string"
+					},
+					"remote_url": {
+						"type": "string"
+					},
+					"owner": {
+						"$ref": "#/components/schemas/CollectionTargetOwner"
+					},
+					"total_items": {
+						"type": "integer",
+						"format": "int64",
+						"nullable": true
+					},
+					"preview_item_count": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"latest_preview_item": {
+						"type": "string",
+						"nullable": true
+					},
+					"latest_preview_published": {
+						"type": "string",
+						"format": "date-time",
+						"nullable": true
+					},
+					"latest_preview_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"summary_excerpt": {
+						"type": "string",
+						"nullable": true
+					},
+					"your_follow": {
+						"allOf": [
+							{
+								"$ref": "#/components/schemas/YourFollowInfo"
+							}
+						],
+						"nullable": true
+					},
+					"latest_unfollow_status": {
+						"allOf": [
+							{
+								"$ref": "#/components/schemas/FederationStatus"
+							}
+						],
+						"nullable": true
+					}
+				}
+			},
+			"CollectionTargetSoftwareCount": {
+				"type": "object",
+				"required": [
+					"software",
+					"count"
+				],
+				"properties": {
+					"software": {
+						"type": "string"
+					},
+					"count": {
+						"type": "integer",
+						"format": "int64"
+					}
+				}
+			},
+			"CollectionTargetList": {
+				"type": "object",
+				"required": [
+					"items",
+					"next_page",
+					"total_count",
+					"scope_total_count",
+					"software_counts"
+				],
+				"properties": {
+					"items": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/CollectionTargetListItem"
+						}
+					},
+					"next_page": {
+						"type": "string",
+						"nullable": true
+					},
+					"total_count": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"scope_total_count": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"software_counts": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/CollectionTargetSoftwareCount"
+						}
+					}
+				}
+			},
+			"CollectionTargetInfo": {
+				"type": "object",
+				"required": [
+					"id",
+					"type",
+					"software",
+					"name",
+					"remote_url",
+					"owner",
+					"followers",
+					"first_page",
+					"last_page",
+					"summary_html",
+					"total_items",
+					"created_local",
+					"updated_at",
+					"preview_items"
+				],
+				"properties": {
+					"id": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"type": {
+						"type": "string"
+					},
+					"software": {
+						"type": "string",
+						"nullable": true
+					},
+					"name": {
+						"type": "string"
+					},
+					"remote_url": {
+						"type": "string"
+					},
+					"owner": {
+						"$ref": "#/components/schemas/CollectionTargetOwner"
+					},
+					"followers": {
+						"type": "string",
+						"nullable": true
+					},
+					"first_page": {
+						"type": "string",
+						"nullable": true
+					},
+					"last_page": {
+						"type": "string",
+						"nullable": true
+					},
+					"summary_html": {
+						"type": "string",
+						"nullable": true
+					},
+					"total_items": {
+						"type": "integer",
+						"format": "int64",
+						"nullable": true
+					},
+					"created_local": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"updated_at": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"your_follow": {
+						"allOf": [
+							{
+								"$ref": "#/components/schemas/YourFollowInfo"
+							}
+						],
+						"nullable": true
+					},
+					"latest_unfollow_status": {
+						"allOf": [
+							{
+								"$ref": "#/components/schemas/FederationStatus"
+							}
+						],
+						"nullable": true
+					},
+					"preview_items": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/CollectionTargetPreviewItem"
+						}
+					}
+				}
+			},
+			"CollectionTargetItemCollection": {
+				"type": "object",
+				"required": [
+					"id",
+					"type",
+					"software",
+					"name",
+					"remote_url",
+					"owner",
+					"preview_item_likes_supported",
+					"preview_item_replies_supported",
+					"can_reply"
+				],
+				"properties": {
+					"id": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"type": {
+						"type": "string"
+					},
+					"software": {
+						"type": "string",
+						"nullable": true
+					},
+					"name": {
+						"type": "string"
+					},
+					"remote_url": {
+						"type": "string"
+					},
+					"owner": {
+						"$ref": "#/components/schemas/CollectionTargetOwner"
+					},
+					"preview_item_likes_supported": {
+						"type": "boolean"
+					},
+					"preview_item_replies_supported": {
+						"type": "boolean"
+					},
+					"can_reply": {
+						"type": "boolean"
+					}
+				}
+			},
+			"CollectionTargetItemComment": {
+				"type": "object",
+				"required": [
+					"id",
+					"remote_url",
+					"content_text",
+					"content_markdown",
+					"content_html",
+					"created",
+					"local",
+					"author",
+					"sensitive",
+					"federation_status"
+				],
+				"properties": {
+					"id": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"remote_url": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_text": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_markdown": {
+						"type": "string",
+						"nullable": true
+					},
+					"content_html": {
+						"type": "string",
+						"nullable": true
+					},
+					"created": {
+						"type": "string",
+						"format": "date-time"
+					},
+					"local": {
+						"type": "boolean"
+					},
+					"author": {
+						"type": "object",
+						"nullable": true
+					},
+					"sensitive": {
+						"type": "boolean"
+					},
+					"federation_status": {
+						"allOf": [
+							{
+								"$ref": "#/components/schemas/FederationStatus"
+							}
+						],
+						"nullable": true
+					}
+				}
+			},
+			"CollectionTargetItemInfo": {
+				"type": "object",
+				"required": [
+					"collection",
+					"item",
+					"comments"
+				],
+				"properties": {
+					"collection": {
+						"$ref": "#/components/schemas/CollectionTargetItemCollection"
+					},
+					"item": {
+						"$ref": "#/components/schemas/CollectionTargetPreviewItem"
+					},
+					"comments": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/CollectionTargetItemComment"
+						}
+					}
+				}
+			},
+			"UnfollowInactiveCommunitiesResult": {
+				"type": "object",
+				"required": [
+					"unfollowed"
+				],
+				"properties": {
+					"unfollowed": {
+						"type": "integer",
+						"format": "int64"
+					}
+				}
+			},
+			"AdminFederationServer": {
+				"type": "object",
+				"required": [
+					"host",
+					"software",
+					"active",
+					"last_checked",
+					"last_success",
+					"failed_checks",
+					"latest_error",
+					"suppressed_reason",
+					"suppressed_at",
+					"interaction_probe_checked_at",
+					"interaction_probe_success_at",
+					"interaction_probe_latest_error",
+					"failure_category"
+				],
+				"properties": {
+					"host": {
+						"type": "string"
+					},
+					"software": {
+						"type": "string",
+						"nullable": true
+					},
+					"active": {
+						"type": "boolean"
+					},
+					"last_checked": {
+						"type": "string",
+						"nullable": true
+					},
+					"last_success": {
+						"type": "string",
+						"nullable": true
+					},
+					"failed_checks": {
+						"type": "integer"
+					},
+					"latest_error": {
+						"type": "string",
+						"nullable": true
+					},
+					"suppressed_reason": {
+						"type": "string",
+						"nullable": true
+					},
+					"suppressed_at": {
+						"type": "string",
+						"nullable": true
+					},
+					"interaction_probe_checked_at": {
+						"type": "string",
+						"nullable": true
+					},
+					"interaction_probe_success_at": {
+						"type": "string",
+						"nullable": true
+					},
+					"interaction_probe_latest_error": {
+						"type": "string",
+						"nullable": true
+					},
+					"failure_category": {
+						"type": "string",
+						"nullable": true
+					}
+				}
+			},
+			"AdminHostProfile": {
+				"type": "object",
+				"required": [
+					"host",
+					"software",
+					"active",
+					"last_checked",
+					"last_success",
+					"failed_checks",
+					"latest_error",
+					"suppressed_reason",
+					"suppressed_at",
+					"interaction_probe_checked_at",
+					"interaction_probe_success_at",
+					"interaction_probe_latest_error",
+					"failure_category",
+					"discovered_communities_total",
+					"discovered_communities_active",
+					"discovered_communities_with_posts",
+					"communities_total",
+					"followed_communities_total",
+					"actor_profiles_total",
+					"high_confidence_actor_profiles_total",
+					"recent_events_total",
+					"recent_failures_total",
+					"useful_community_source",
+					"newest_community_seen",
+					"catalog_status"
+				],
+				"properties": {
+					"host": {
+						"type": "string"
+					},
+					"software": {
+						"type": "string",
+						"nullable": true
+					},
+					"active": {
+						"type": "boolean"
+					},
+					"last_checked": {
+						"type": "string",
+						"nullable": true
+					},
+					"last_success": {
+						"type": "string",
+						"nullable": true
+					},
+					"failed_checks": {
+						"type": "integer"
+					},
+					"latest_error": {
+						"type": "string",
+						"nullable": true
+					},
+					"suppressed_reason": {
+						"type": "string",
+						"nullable": true
+					},
+					"suppressed_at": {
+						"type": "string",
+						"nullable": true
+					},
+					"interaction_probe_checked_at": {
+						"type": "string",
+						"nullable": true
+					},
+					"interaction_probe_success_at": {
+						"type": "string",
+						"nullable": true
+					},
+					"interaction_probe_latest_error": {
+						"type": "string",
+						"nullable": true
+					},
+					"failure_category": {
+						"type": "string",
+						"nullable": true
+					},
+					"discovered_communities_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovered_communities_active": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovered_communities_with_posts": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"communities_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"followed_communities_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"actor_profiles_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"high_confidence_actor_profiles_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"recent_events_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"recent_failures_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"useful_community_source": {
+						"type": "boolean"
+					},
+					"newest_community_seen": {
+						"type": "string",
+						"nullable": true
+					},
+					"catalog_status": {
+						"type": "string"
+					}
+				}
+			},
+			"AdminFederationSummary": {
+				"type": "object",
+				"required": [
+					"discovery_servers_total",
+					"discovery_servers_active",
+					"discovery_servers_inactive",
+					"discovery_servers_suppressed",
+					"discovery_servers_probe_success",
+					"discovered_communities_total",
+					"discovered_communities_active",
+					"discovered_communities_with_posts",
+					"actor_target_profiles_total",
+					"blocked_ap_ids_total",
+					"server_suppressed_communities_total",
+					"user_suppressed_communities_total",
+					"federation_events_total",
+					"discovered_communities_visible",
+					"discovery_servers_useful_sources",
+					"discovery_servers_known_only",
+					"discovery_servers_due",
+					"task_pending_total",
+					"task_running_total",
+					"task_failed_total",
+					"task_completed_total",
+					"task_table_bytes",
+					"task_pending_outbound",
+					"task_pending_inbox",
+					"task_pending_discovery",
+					"task_pending_preview",
+					"task_pending_readback",
+					"task_oldest_pending"
+				],
+				"properties": {
+					"discovery_servers_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovery_servers_active": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovery_servers_inactive": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovery_servers_suppressed": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovery_servers_probe_success": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovered_communities_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovered_communities_active": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovered_communities_with_posts": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"actor_target_profiles_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"blocked_ap_ids_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"server_suppressed_communities_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"user_suppressed_communities_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"federation_events_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovered_communities_visible": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovery_servers_useful_sources": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovery_servers_known_only": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"discovery_servers_due": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_pending_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_running_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_failed_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_completed_total": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_table_bytes": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_pending_outbound": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_pending_inbox": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_pending_discovery": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_pending_preview": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_pending_readback": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"task_oldest_pending": {
+						"type": "string",
+						"nullable": true
+					}
+				}
+			},
+			"AdminFederationBlockedApId": {
+				"type": "object",
+				"required": [
+					"ap_id"
+				],
+				"properties": {
+					"ap_id": {
+						"type": "string"
+					}
+				}
+			},
+			"AdminFederationSuppressedCommunity": {
+				"type": "object",
+				"required": [
+					"community_id",
+					"community_name",
+					"community_ap_id",
+					"reason",
+					"updated_at"
+				],
+				"properties": {
+					"community_id": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"community_name": {
+						"type": "string"
+					},
+					"community_ap_id": {
+						"type": "string",
+						"nullable": true
+					},
+					"reason": {
+						"type": "string"
+					},
+					"updated_at": {
+						"type": "string"
+					}
+				}
+			},
+			"AdminFederationUserSuppressedCommunity": {
+				"type": "object",
+				"required": [
+					"community_id",
+					"community_name",
+					"community_ap_id",
+					"person_id",
+					"username",
+					"person_ap_id",
+					"reason",
+					"updated_at"
+				],
+				"properties": {
+					"community_id": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"community_name": {
+						"type": "string"
+					},
+					"community_ap_id": {
+						"type": "string",
+						"nullable": true
+					},
+					"person_id": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"username": {
+						"type": "string"
+					},
+					"person_ap_id": {
+						"type": "string",
+						"nullable": true
+					},
+					"reason": {
+						"type": "string"
+					},
+					"updated_at": {
+						"type": "string"
+					}
+				}
+			},
+			"AdminFederationActorProfileFamily": {
+				"type": "object",
+				"required": [
+					"family",
+					"target",
+					"actor_kind",
+					"count",
+					"high_confidence_count"
+				],
+				"properties": {
+					"family": {
+						"type": "string"
+					},
+					"target": {
+						"type": "string"
+					},
+					"actor_kind": {
+						"type": "string"
+					},
+					"count": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"high_confidence_count": {
+						"type": "integer",
+						"format": "int64"
+					}
+				}
+			},
+			"AdminFederationActorProfile": {
+				"type": "object",
+				"required": [
+					"actor_ap_id",
+					"target",
+					"family",
+					"actor_kind",
+					"source",
+					"confidence",
+					"has_inbox",
+					"has_outbox",
+					"has_followers",
+					"has_featured",
+					"observed_object_types",
+					"observed_activity_types",
+					"updated_at"
+				],
+				"properties": {
+					"actor_ap_id": {
+						"type": "string"
+					},
+					"target": {
+						"type": "string"
+					},
+					"family": {
+						"type": "string"
+					},
+					"actor_kind": {
+						"type": "string"
+					},
+					"source": {
+						"type": "string"
+					},
+					"confidence": {
+						"type": "integer"
+					},
+					"has_inbox": {
+						"type": "boolean"
+					},
+					"has_outbox": {
+						"type": "boolean"
+					},
+					"has_followers": {
+						"type": "boolean"
+					},
+					"has_featured": {
+						"type": "boolean"
+					},
+					"observed_object_types": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"observed_activity_types": {
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					},
+					"updated_at": {
+						"type": "string"
+					}
+				}
+			},
+			"AdminFederationEvent": {
+				"type": "object",
+				"required": [
+					"direction",
+					"action",
+					"status",
+					"host",
+					"actor_ap_id",
+					"object_ap_id",
+					"target_ap_id",
+					"activity_type",
+					"task_kind",
+					"error_class",
+					"error_text",
+					"created_at"
+				],
+				"properties": {
+					"direction": {
+						"type": "string"
+					},
+					"action": {
+						"type": "string"
+					},
+					"status": {
+						"type": "string"
+					},
+					"host": {
+						"type": "string",
+						"nullable": true
+					},
+					"actor_ap_id": {
+						"type": "string",
+						"nullable": true
+					},
+					"object_ap_id": {
+						"type": "string",
+						"nullable": true
+					},
+					"target_ap_id": {
+						"type": "string",
+						"nullable": true
+					},
+					"activity_type": {
+						"type": "string",
+						"nullable": true
+					},
+					"task_kind": {
+						"type": "string",
+						"nullable": true
+					},
+					"error_class": {
+						"type": "string",
+						"nullable": true
+					},
+					"error_text": {
+						"type": "string",
+						"nullable": true
+					},
+					"created_at": {
+						"type": "string"
+					}
+				}
+			},
+			"AdminFederationReplayableTask": {
+				"type": "object",
+				"required": [
+					"id",
+					"kind",
+					"state",
+					"attempts",
+					"max_attempts",
+					"latest_error",
+					"created_at",
+					"attempted_at"
+				],
+				"properties": {
+					"id": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"kind": {
+						"type": "string"
+					},
+					"state": {
+						"type": "string"
+					},
+					"attempts": {
+						"type": "integer"
+					},
+					"max_attempts": {
+						"type": "integer"
+					},
+					"latest_error": {
+						"type": "string",
+						"nullable": true
+					},
+					"created_at": {
+						"type": "string"
+					},
+					"attempted_at": {
+						"type": "string",
+						"nullable": true
+					}
+				}
+			},
+			"AdminFederationFollowedCommunityHealth": {
+				"type": "object",
+				"required": [
+					"community_id",
+					"community_name",
+					"community_ap_id",
+					"host",
+					"software",
+					"host_active",
+					"host_failed_checks",
+					"latest_error",
+					"suppressed_reason",
+					"last_success",
+					"local_followers",
+					"visible_posts",
+					"last_post",
+					"remote_post_count",
+					"catalog_last_seen",
+					"health_status"
+				],
+				"properties": {
+					"community_id": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"community_name": {
+						"type": "string"
+					},
+					"community_ap_id": {
+						"type": "string",
+						"nullable": true
+					},
+					"host": {
+						"type": "string"
+					},
+					"software": {
+						"type": "string",
+						"nullable": true
+					},
+					"host_active": {
+						"type": "boolean",
+						"nullable": true
+					},
+					"host_failed_checks": {
+						"type": "integer",
+						"nullable": true
+					},
+					"latest_error": {
+						"type": "string",
+						"nullable": true
+					},
+					"suppressed_reason": {
+						"type": "string",
+						"nullable": true
+					},
+					"last_success": {
+						"type": "string",
+						"nullable": true
+					},
+					"local_followers": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"visible_posts": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"last_post": {
+						"type": "string",
+						"nullable": true
+					},
+					"remote_post_count": {
+						"type": "integer",
+						"format": "int64"
+					},
+					"catalog_last_seen": {
+						"type": "string",
+						"nullable": true
+					},
+					"health_status": {
+						"type": "string"
+					}
+				}
+			},
+			"AdminFederationHealth": {
+				"type": "object",
+				"required": [
+					"summary",
+					"suppressed_servers",
+					"failing_servers",
+					"host_profiles",
+					"followed_community_health",
+					"blocked_ap_ids",
+					"server_suppressed_communities",
+					"user_suppressed_communities",
+					"actor_profile_families",
+					"recent_actor_profiles",
+					"recent_events",
+					"replayable_failed_tasks"
+				],
+				"properties": {
+					"summary": {
+						"$ref": "#/components/schemas/AdminFederationSummary"
+					},
+					"suppressed_servers": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminFederationServer"
+						}
+					},
+					"failing_servers": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminFederationServer"
+						}
+					},
+					"host_profiles": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminHostProfile"
+						}
+					},
+					"followed_community_health": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminFederationFollowedCommunityHealth"
+						}
+					},
+					"blocked_ap_ids": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminFederationBlockedApId"
+						}
+					},
+					"server_suppressed_communities": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminFederationSuppressedCommunity"
+						}
+					},
+					"user_suppressed_communities": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminFederationUserSuppressedCommunity"
+						}
+					},
+					"actor_profile_families": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminFederationActorProfileFamily"
+						}
+					},
+					"recent_actor_profiles": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminFederationActorProfile"
+						}
+					},
+					"recent_events": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminFederationEvent"
+						}
+					},
+					"replayable_failed_tasks": {
+						"type": "array",
+						"items": {
+							"$ref": "#/components/schemas/AdminFederationReplayableTask"
+						}
+					}
+				}
 			}
 		},
 		"securitySchemes": {
@@ -347,10 +2276,20 @@
 									"type": "array",
 									"items": {
 										"type": "object",
-										"required": ["id"],
+										"required": [
+											"id"
+										],
 										"properties": {
-											"id": {"type": "integer"},
-											"type": {"type": "string", "enum": ["community", "user"]}
+											"id": {
+												"type": "integer"
+											},
+											"type": {
+												"type": "string",
+												"enum": [
+													"community",
+													"user"
+												]
+											}
 										}
 									}
 								}
@@ -368,15 +2307,21 @@
 						"name": "commentID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "include_your",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"}
+						"schema": {
+							"type": "boolean"
+						}
 					},
-					{"$ref": "#/components/parameters/image_handling"}
+					{
+						"$ref": "#/components/parameters/image_handling"
+					}
 				],
 				"responses": {
 					"200": {
@@ -385,23 +2330,55 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["id", "content_text", "content_html", "sensitive", "author", "created", "deleted", "replies", "parent", "post", "remote_url"],
+									"required": [
+										"id",
+										"content_text",
+										"content_html",
+										"sensitive",
+										"author",
+										"created",
+										"deleted",
+										"replies",
+										"parent",
+										"post",
+										"remote_url"
+									],
 									"properties": {
-										"id": {"type": "integer"},
-										"remote_url": {"type": "string", "nullable": true},
-										"content_text": {"type": "string", "nullable": true},
-										"content_html": {"type": "string", "nullable": true},
-										"sensitive": {"type": "boolean"},
+										"id": {
+											"type": "integer"
+										},
+										"remote_url": {
+											"type": "string",
+											"nullable": true
+										},
+										"content_text": {
+											"type": "string",
+											"nullable": true
+										},
+										"content_html": {
+											"type": "string",
+											"nullable": true
+										},
+										"sensitive": {
+											"type": "boolean"
+										},
 										"author": {
 											"$ref": "#/components/schemas/NullableMinimalUserInfo"
 										},
-										"created": {"type": "string", "format": "date-time"},
-										"deleted": {"type": "boolean"},
+										"created": {
+											"type": "string",
+											"format": "date-time"
+										},
+										"deleted": {
+											"type": "boolean"
+										},
 										"replies": {
 											"type": "object",
 											"nullable": true,
 											"properties": {
-												"items": {"type": "array"},
+												"items": {
+													"type": "array"
+												},
 												"next_page": {
 													"type": "string",
 													"nullable": true,
@@ -410,23 +2387,35 @@
 											},
 											"description": "This endpoint no longer includes replies. However, if there are no replies, this will be non-null and items will be an empty array."
 										},
-										"your_vote": {"$ref": "#/components/schemas/YourVote"},
+										"your_vote": {
+											"$ref": "#/components/schemas/YourVote"
+										},
 										"parent": {
 											"type": "object",
 											"nullable": true,
-											"required": ["id"],
+											"required": [
+												"id"
+											],
 											"properties": {
-												"id": {"type": "integer"}
+												"id": {
+													"type": "integer"
+												}
 											}
 										},
-										"post": {"$ref": "#/components/schemas/NullableMinimalPostInfo"}
+										"post": {
+											"$ref": "#/components/schemas/NullableMinimalPostInfo"
+										}
 									}
 								}
 							}
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			},
 			"delete": {
 				"summary": "Delete a comment",
@@ -435,7 +2424,9 @@
 						"name": "commentID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
@@ -443,7 +2434,11 @@
 						"description": "Successfully deleted."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/comments/{commentID}/replies": {
@@ -454,39 +2449,53 @@
 						"name": "commentID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "include_your",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"}
+						"schema": {
+							"type": "boolean"
+						}
 					},
-					{"$ref": "#/components/parameters/image_handling"},
+					{
+						"$ref": "#/components/parameters/image_handling"
+					},
 					{
 						"name": "depth",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "integer"},
+						"schema": {
+							"type": "integer"
+						},
 						"description": "Number of levels to expand replies for. Defaults to 3."
 					},
 					{
 						"name": "limit",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "sort",
 						"in": "query",
 						"required": false,
-						"schema": {"$ref": "#/components/schemas/SortType"}
+						"schema": {
+							"$ref": "#/components/schemas/SortType"
+						}
 					},
 					{
 						"name": "page",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {
@@ -496,7 +2505,10 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
@@ -522,7 +2534,9 @@
 						"name": "commentID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"requestBody": {
@@ -532,13 +2546,19 @@
 							"schema": {
 								"type": "object",
 								"properties": {
-									"content_text": {"type": "string"},
-									"content_markdown": {"type": "string"},
+									"content_text": {
+										"type": "string"
+									},
+									"content_markdown": {
+										"type": "string"
+									},
 									"attachment": {
 										"type": "string",
 										"description": "Must be a `local-media://` reference"
 									},
-									"sensitive": {"type": "boolean"}
+									"sensitive": {
+										"type": "boolean"
+									}
 								}
 							}
 						}
@@ -551,14 +2571,23 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["id", "post"],
+									"required": [
+										"id",
+										"post"
+									],
 									"properties": {
-										"id": {"type": "integer"},
+										"id": {
+											"type": "integer"
+										},
 										"post": {
 											"type": "object",
-											"required": ["id"],
+											"required": [
+												"id"
+											],
 											"properties": {
-												"id": {"type": "integer"}
+												"id": {
+													"type": "integer"
+												}
 											}
 										}
 									}
@@ -577,13 +2606,17 @@
 						"name": "commentID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "page",
 						"in": "query",
 						"required": true,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {
@@ -593,15 +2626,22 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
 											"items": {
 												"type": "object",
-												"required": ["user"],
+												"required": [
+													"user"
+												],
 												"properties": {
-													"user": {"$ref": "#/components/schemas/MinimalUserInfo"}
+													"user": {
+														"$ref": "#/components/schemas/MinimalUserInfo"
+													}
 												}
 											}
 										},
@@ -625,7 +2665,9 @@
 						"name": "commentID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
@@ -633,7 +2675,11 @@
 						"description": "Successfully liked."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			},
 			"delete": {
 				"summary": "Retract a like of a comment",
@@ -642,7 +2688,9 @@
 						"name": "commentID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
@@ -650,7 +2698,11 @@
 						"description": "Successfully unliked."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/communities": {
@@ -661,54 +2713,76 @@
 						"name": "include_your",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "If true, will include `you_are_moderator` and `your_follow` in list. Requires login."
 					},
-					{"$ref": "#/components/parameters/image_handling"},
+					{
+						"$ref": "#/components/parameters/image_handling"
+					},
 					{
 						"name": "search",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					},
 					{
 						"name": "your_follow.accepted",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "Filter to either communities you are following or waiting to follow. Requires login."
 					},
 					{
 						"name": "you_are_moderator",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "Filter based on whether you are a moderator of the community. Requires login."
 					},
 					{
 						"name": "local",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "Filter to either local or remote communities."
 					},
 					{
 						"name": "limit",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "page",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					},
 					{
 						"name": "sort",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string", "enum": ["old_local", "alphabetic"]}
+						"schema": {
+							"type": "string",
+							"enum": [
+								"old_local",
+								"alphabetic"
+							]
+						}
 					}
 				],
 				"responses": {
@@ -718,7 +2792,10 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
@@ -736,7 +2813,11 @@
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			},
 			"post": {
 				"summary": "Create a community",
@@ -746,9 +2827,13 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["name"],
+								"required": [
+									"name"
+								],
 								"properties": {
-									"name": {"type": "string"}
+									"name": {
+										"type": "string"
+									}
 								}
 							}
 						}
@@ -761,13 +2846,19 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["community"],
+									"required": [
+										"community"
+									],
 									"properties": {
 										"community": {
 											"type": "object",
-											"required": ["id"],
+											"required": [
+												"id"
+											],
 											"properties": {
-												"id": {"type": "integer"}
+												"id": {
+													"type": "integer"
+												}
 											}
 										}
 									}
@@ -776,7 +2867,11 @@
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/communities/{communityID}": {
@@ -787,15 +2882,21 @@
 						"name": "communityID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "include_your",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"}
+						"schema": {
+							"type": "boolean"
+						}
 					},
-					{"$ref": "#/components/parameters/image_handling"}
+					{
+						"$ref": "#/components/parameters/image_handling"
+					}
 				],
 				"responses": {
 					"200": {
@@ -809,7 +2910,11 @@
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			},
 			"patch": {
 				"summary": "Edit community details",
@@ -818,7 +2923,9 @@
 						"name": "communityID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"requestBody": {
@@ -828,18 +2935,30 @@
 							"schema": {
 								"type": "object",
 								"properties": {
-									"description_text": {"type": "string"},
-									"description_markdown": {"type": "string"},
-									"description_html": {"type": "string"}
+									"description_text": {
+										"type": "string"
+									},
+									"description_markdown": {
+										"type": "string"
+									},
+									"description_html": {
+										"type": "string"
+									}
 								}
 							}
 						}
 					}
 				},
 				"responses": {
-					"204": {"description": "Successfully modified."}
+					"204": {
+						"description": "Successfully modified."
+					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			},
 			"delete": {
 				"summary": "Delete a community",
@@ -848,13 +2967,21 @@
 						"name": "communityID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
-					"204": {"description": "Successfully deleted."}
+					"204": {
+						"description": "Successfully deleted."
+					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/communities/{communityID}/follow": {
@@ -865,7 +2992,9 @@
 						"name": "communityID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"requestBody": {
@@ -891,16 +3020,24 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["accepted"],
+									"required": [
+										"accepted"
+									],
 									"properties": {
-										"accepted": {"type": "boolean"}
+										"accepted": {
+											"type": "boolean"
+										}
 									}
 								}
 							}
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/communities/{communityID}/moderators": {
@@ -911,7 +3048,9 @@
 						"name": "communityID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
@@ -939,13 +3078,17 @@
 						"name": "communityID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "userID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
@@ -953,7 +3096,11 @@
 						"description": "Successfully added."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			},
 			"delete": {
 				"summary": "Remove a moderator from a community",
@@ -962,13 +3109,17 @@
 						"name": "communityID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "userID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
@@ -976,7 +3127,11 @@
 						"description": "Successfully removed."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/communities/{communityID}/modlog/events": {
@@ -987,19 +3142,25 @@
 						"name": "communityID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "limit",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "page",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {
@@ -1009,7 +3170,10 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
@@ -1017,27 +3181,52 @@
 												"allOf": [
 													{
 														"type": "object",
-														"required": ["time"],
+														"required": [
+															"time"
+														],
 														"properties": {
-															"time": {"type": "string", "format": "date-time"}
+															"time": {
+																"type": "string",
+																"format": "date-time"
+															}
 														}
 													},
 													{
 														"oneOf": [
 															{
 																"type": "object",
-																"required": ["type", "post"],
+																"required": [
+																	"type",
+																	"post"
+																],
 																"properties": {
-																	"type": {"type": "string", "enum": ["reject_post"]},
-																	"post": {"$ref": "#/components/schemas/MinimalPostInfo"}
+																	"type": {
+																		"type": "string",
+																		"enum": [
+																			"reject_post"
+																		]
+																	},
+																	"post": {
+																		"$ref": "#/components/schemas/MinimalPostInfo"
+																	}
 																}
 															},
 															{
 																"type": "object",
-																"required": ["type", "post"],
+																"required": [
+																	"type",
+																	"post"
+																],
 																"properties": {
-																	"type": {"type": "string", "enum": ["approve_post"]},
-																	"post": {"$ref": "#/components/schemas/MinimalPostInfo"}
+																	"type": {
+																		"type": "string",
+																		"enum": [
+																			"approve_post"
+																		]
+																	},
+																	"post": {
+																		"$ref": "#/components/schemas/MinimalPostInfo"
+																	}
 																}
 															}
 														]
@@ -1045,7 +3234,10 @@
 												]
 											}
 										},
-										"next_page": {"type": "string", "nullable": true}
+										"next_page": {
+											"type": "string",
+											"nullable": true
+										}
 									}
 								}
 							}
@@ -1062,13 +3254,17 @@
 						"name": "communityID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "postID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"requestBody": {
@@ -1078,8 +3274,12 @@
 							"schema": {
 								"type": "object",
 								"properties": {
-									"approved": {"type": "boolean"},
-									"sticky": {"type": "boolean"}
+									"approved": {
+										"type": "boolean"
+									},
+									"sticky": {
+										"type": "boolean"
+									}
 								}
 							}
 						}
@@ -1100,7 +3300,9 @@
 						"name": "communityID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
@@ -1108,7 +3310,11 @@
 						"description": "Successfully unfollowed."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/debug/db": {
@@ -1121,16 +3327,35 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["pool"],
+									"required": [
+										"pool"
+									],
 									"properties": {
 										"pool": {
 											"type": "object",
-											"required": ["max", "size", "idle", "waiting"],
+											"required": [
+												"max",
+												"size",
+												"idle",
+												"waiting"
+											],
 											"properties": {
-												"max": {"type": "integer", "description": "Configured maximum pool size"},
-												"size": {"type": "integer", "description": "Current number of connections"},
-												"idle": {"type": "integer", "description": "Number of idle connections"},
-												"waiting": {"type": "integer", "description": "Number of connections currently in use"}
+												"max": {
+													"type": "integer",
+													"description": "Configured maximum pool size"
+												},
+												"size": {
+													"type": "integer",
+													"description": "Current number of connections"
+												},
+												"idle": {
+													"type": "integer",
+													"description": "Number of idle connections"
+												},
+												"waiting": {
+													"type": "integer",
+													"description": "Number of connections currently in use"
+												}
 											}
 										}
 									}
@@ -1149,22 +3374,30 @@
 						"name": "to_community",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "to_this_site_admin",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"}
+						"schema": {
+							"type": "boolean"
+						}
 					},
 					{
 						"name": "dismissed",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "Filter by whether the flag is dismissed for the target. Requires exactly one target filter."
 					},
-					{"$ref": "#/components/parameters/image_handling"}
+					{
+						"$ref": "#/components/parameters/image_handling"
+					}
 				],
 				"responses": {
 					"200": {
@@ -1173,7 +3406,10 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
@@ -1181,16 +3417,32 @@
 												"allOf": [
 													{
 														"type": "object",
-														"required": ["id", "flagger", "created_local", "content"],
+														"required": [
+															"id",
+															"flagger",
+															"created_local",
+															"content"
+														],
 														"properties": {
-															"id": {"type": "integer"},
-															"flagger": {"$ref": "#/components/schemas/MinimalUserInfo"},
-															"created_local": {"type": "string", "format": "date-time"},
+															"id": {
+																"type": "integer"
+															},
+															"flagger": {
+																"$ref": "#/components/schemas/MinimalUserInfo"
+															},
+															"created_local": {
+																"type": "string",
+																"format": "date-time"
+															},
 															"content": {
 																"nullable": true,
-																"required": ["content_text"],
+																"required": [
+																	"content_text"
+																],
 																"properties": {
-																	"content_text": {"type": "string"}
+																	"content_text": {
+																		"type": "string"
+																	}
 																}
 															}
 														}
@@ -1199,10 +3451,20 @@
 														"oneOf": [
 															{
 																"type": "object",
-																"required": ["type", "post"],
+																"required": [
+																	"type",
+																	"post"
+																],
 																"properties": {
-																	"type": {"type": "string", "enum": ["post"]},
-																	"post": {"$ref": "#/components/schemas/PostListPost"}
+																	"type": {
+																		"type": "string",
+																		"enum": [
+																			"post"
+																		]
+																	},
+																	"post": {
+																		"$ref": "#/components/schemas/PostListPost"
+																	}
 																}
 															}
 														]
@@ -1210,7 +3472,10 @@
 												]
 											}
 										},
-										"next_page": {"type": "string", "nullable": true}
+										"next_page": {
+											"type": "string",
+											"nullable": true
+										}
 									}
 								}
 							}
@@ -1227,7 +3492,9 @@
 						"name": "flagID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"requestBody": {
@@ -1236,7 +3503,9 @@
 							"schema": {
 								"type": "object",
 								"properties": {
-									"community_dismissed": {"type": "boolean"}
+									"community_dismissed": {
+										"type": "boolean"
+									}
 								}
 							}
 						}
@@ -1258,9 +3527,14 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["email_address"],
+								"required": [
+									"email_address"
+								],
 								"properties": {
-									"email_address": {"type": "string", "format": "email"}
+									"email_address": {
+										"type": "string",
+										"format": "email"
+									}
 								}
 							}
 						}
@@ -1281,7 +3555,9 @@
 						"name": "key",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {
@@ -1302,7 +3578,9 @@
 						"name": "key",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"requestBody": {
@@ -1311,9 +3589,14 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["new_password"],
+								"required": [
+									"new_password"
+								],
 								"properties": {
-									"new_password": {"type": "string", "format": "password"}
+									"new_password": {
+										"type": "string",
+										"format": "password"
+									}
 								}
 							}
 						}
@@ -1330,7 +3613,9 @@
 			"get": {
 				"summary": "Fetch information about the instance",
 				"parameters": [
-					{"$ref": "#/components/parameters/image_handling"}
+					{
+						"$ref": "#/components/parameters/image_handling"
+					}
 				],
 				"responses": {
 					"200": {
@@ -1339,14 +3624,31 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["software", "description", "web_push_vapid_key", "signup_allowed", "invitations_enabled", "community_creation_requirement", "invitation_creation_requirement"],
+									"required": [
+										"software",
+										"description",
+										"web_push_vapid_key",
+										"signup_allowed",
+										"invitations_enabled",
+										"community_creation_requirement",
+										"invitation_creation_requirement"
+									],
 									"properties": {
 										"software": {
 											"type": "object",
-											"required": ["name", "version"],
+											"required": [
+												"name",
+												"version"
+											],
 											"properties": {
-												"name": {"type": "string", "example": "lotide"},
-												"version": {"type": "string", "example": "0.5.0-pre"}
+												"name": {
+													"type": "string",
+													"example": "lotide"
+												},
+												"version": {
+													"type": "string",
+													"example": "0.5.0-pre"
+												}
 											}
 										},
 										"description": {
@@ -1365,12 +3667,16 @@
 										"community_creation_requirement": {
 											"nullable": true,
 											"type": "string",
-											"enum": ["site_admin"]
+											"enum": [
+												"site_admin"
+											]
 										},
 										"invitation_creation_requirement": {
 											"nullable": true,
 											"type": "string",
-											"enum": ["site_admin"]
+											"enum": [
+												"site_admin"
+											]
 										}
 									}
 								}
@@ -1388,20 +3694,34 @@
 							"schema": {
 								"type": "object",
 								"properties": {
-									"description_text": {"type": "string"},
-									"description_markdown": {"type": "string"},
-									"description_html": {"type": "string"},
-									"signup_allowed": {"type": "boolean"},
-									"invitations_enabled": {"type": "boolean"},
+									"description_text": {
+										"type": "string"
+									},
+									"description_markdown": {
+										"type": "string"
+									},
+									"description_html": {
+										"type": "string"
+									},
+									"signup_allowed": {
+										"type": "boolean"
+									},
+									"invitations_enabled": {
+										"type": "boolean"
+									},
 									"community_creation_requirement": {
 										"nullable": true,
 										"type": "string",
-										"enum": ["site_admin"]
+										"enum": [
+											"site_admin"
+										]
 									},
 									"invitation_creation_requirement": {
 										"nullable": true,
 										"type": "string",
-										"enum": ["site_admin"]
+										"enum": [
+											"site_admin"
+										]
 									}
 								}
 							}
@@ -1423,13 +3743,17 @@
 						"name": "limit",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "page",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {
@@ -1439,7 +3763,10 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
@@ -1447,18 +3774,29 @@
 												"allOf": [
 													{
 														"type": "object",
-														"required": ["time"],
+														"required": [
+															"time"
+														],
 														"properties": {
-															"time": {"type": "string", "format": "date-time"}
+															"time": {
+																"type": "string",
+																"format": "date-time"
+															}
 														}
 													},
 													{
 														"type": "object",
-														"required": ["type", "author", "community"],
+														"required": [
+															"type",
+															"author",
+															"community"
+														],
 														"properties": {
 															"type": {
 																"type": "string",
-																"enum": ["delete_post"]
+																"enum": [
+																	"delete_post"
+																]
 															},
 															"author": {
 																"$ref": "#/components/schemas/MinimalUserInfo"
@@ -1470,11 +3808,17 @@
 													},
 													{
 														"type": "object",
-														"required": ["type", "author", "post"],
+														"required": [
+															"type",
+															"author",
+															"post"
+														],
 														"properties": {
 															"type": {
 																"type": "string",
-																"enum": ["delete_comment"]
+																"enum": [
+																	"delete_comment"
+																]
 															},
 															"author": {
 																"$ref": "#/components/schemas/MinimalUserInfo"
@@ -1486,11 +3830,16 @@
 													},
 													{
 														"type": "object",
-														"required": ["type", "user"],
+														"required": [
+															"type",
+															"user"
+														],
 														"properties": {
 															"type": {
 																"type": "string",
-																"enum": ["suspend_user"]
+																"enum": [
+																	"suspend_user"
+																]
 															},
 															"user": {
 																"$ref": "#/components/schemas/MinimalUserInfo"
@@ -1499,11 +3848,16 @@
 													},
 													{
 														"type": "object",
-														"required": ["type", "user"],
+														"required": [
+															"type",
+															"user"
+														],
 														"properties": {
 															"type": {
 																"type": "string",
-																"enum": ["unsuspend_user"]
+																"enum": [
+																	"unsuspend_user"
+																]
 															},
 															"user": {
 																"$ref": "#/components/schemas/MinimalUserInfo"
@@ -1513,7 +3867,10 @@
 												]
 											}
 										},
-										"next_page": {"type": "string", "nullable": true}
+										"next_page": {
+											"type": "string",
+											"nullable": true
+										}
 									}
 								}
 							}
@@ -1542,23 +3899,46 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
 											"items": {
 												"type": "object",
-												"required": ["id", "key", "created_by", "created_at", "used"],
+												"required": [
+													"id",
+													"key",
+													"created_by",
+													"created_at",
+													"used"
+												],
 												"properties": {
-													"id": {"type": "integer"},
-													"key": {"type": "string"},
-													"created_by": {"$ref": "#/components/schemas/MinimalUserInfo"},
-													"created_at": {"type": "string", "format": "date-time"},
-													"used": {"type": "boolean"}
+													"id": {
+														"type": "integer"
+													},
+													"key": {
+														"type": "string"
+													},
+													"created_by": {
+														"$ref": "#/components/schemas/MinimalUserInfo"
+													},
+													"created_at": {
+														"type": "string",
+														"format": "date-time"
+													},
+													"used": {
+														"type": "boolean"
+													}
 												}
 											}
 										},
-										"next_page": {"type": "string", "nullable": true}
+										"next_page": {
+											"type": "string",
+											"nullable": true
+										}
 									}
 								}
 							}
@@ -1575,10 +3955,17 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["key", "id"],
+									"required": [
+										"key",
+										"id"
+									],
 									"properties": {
-										"key": {"type": "string"},
-										"id": {"type": "integer"}
+										"key": {
+											"type": "string"
+										},
+										"id": {
+											"type": "integer"
+										}
 									}
 								}
 							}
@@ -1596,7 +3983,10 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["username", "password"],
+								"required": [
+									"username",
+									"password"
+								],
 								"properties": {
 									"username": {
 										"type": "string"
@@ -1618,9 +4008,13 @@
 									"allOf": [
 										{
 											"type": "object",
-											"required": ["token"],
+											"required": [
+												"token"
+											],
 											"properties": {
-												"token": {"type": "string"}
+												"token": {
+													"type": "string"
+												}
 											}
 										},
 										{
@@ -1649,7 +4043,11 @@
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			},
 			"delete": {
 				"summary": "Log out",
@@ -1659,7 +4057,11 @@
 						"description": "Successfully ended."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/media": {
@@ -1673,16 +4075,24 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["id"],
+									"required": [
+										"id"
+									],
 									"properties": {
-										"id": {"type": "string"}
+										"id": {
+											"type": "string"
+										}
 									}
 								}
 							}
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/misc/render_markdown": {
@@ -1694,9 +4104,13 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["content_markdown"],
+								"required": [
+									"content_markdown"
+								],
 								"properties": {
-									"content_markdown": {"type": "string"}
+									"content_markdown": {
+										"type": "string"
+									}
 								}
 							}
 						}
@@ -1709,9 +4123,13 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["content_html"],
+									"required": [
+										"content_html"
+									],
 									"properties": {
-										"content_html": {"type": "string"}
+										"content_html": {
+											"type": "string"
+										}
 									}
 								}
 							}
@@ -1728,17 +4146,28 @@
 						"name": "include_your",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"}
+						"schema": {
+							"type": "boolean"
+						}
 					},
-					{"$ref": "#/components/parameters/image_handling"},
+					{
+						"$ref": "#/components/parameters/image_handling"
+					},
 					{
 						"name": "sort",
 						"in": "query",
 						"required": false,
 						"schema": {
 							"oneOf": [
-								{"$ref": "#/components/schemas/SortType"},
-								{"type": "string", "enum": ["relevant"]}
+								{
+									"$ref": "#/components/schemas/SortType"
+								},
+								{
+									"type": "string",
+									"enum": [
+										"relevant"
+									]
+								}
 							]
 						}
 					},
@@ -1746,41 +4175,53 @@
 						"name": "search",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					},
 					{
 						"name": "in_any_local_community",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "Filter by whether the post is approved in a local community"
 					},
 					{
 						"name": "use_aggregate_filters",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "If true, will omit posts from communities marked as hide_posts_from_aggregates"
 					},
 					{
 						"name": "community",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "integer"},
+						"schema": {
+							"type": "integer"
+						},
 						"description": "If present, will filter to posts approved in the specified community"
 					},
 					{
 						"name": "in_your_follows",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "Filter by whether the post is approved in one of the communities you follow"
 					},
 					{
 						"name": "created_within",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string"},
+						"schema": {
+							"type": "string"
+						},
 						"example": "P6M",
 						"description": "How far into the past to include posts from, as an ISO8601 duration."
 					},
@@ -1788,20 +4229,26 @@
 						"name": "sort_sticky",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "If true, will sort sticky posts to the top"
 					},
 					{
 						"name": "limit",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "page",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {
@@ -1811,7 +4258,10 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
@@ -1838,24 +4288,44 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["community", "title"],
+								"required": [
+									"community",
+									"title"
+								],
 								"properties": {
-									"community": {"type": "integer"},
+									"community": {
+										"type": "integer"
+									},
 									"href": {
 										"type": "string",
 										"description": "URL target for the post. Can be set to a hosted media file by specifying `local-media://<id>`"
 									},
-									"content_markdown": {"type": "string"},
-									"content_text": {"type": "string"},
-									"title": {"type": "string"},
+									"content_markdown": {
+										"type": "string"
+									},
+									"content_text": {
+										"type": "string"
+									},
+									"title": {
+										"type": "string"
+									},
 									"poll": {
 										"type": "object",
-										"required": ["multiple", "options", "closed_in"],
+										"required": [
+											"multiple",
+											"options",
+											"closed_in"
+										],
 										"properties": {
-											"multiple": {"type": "boolean", "description": "Whether voters can choose multiple options"},
+											"multiple": {
+												"type": "boolean",
+												"description": "Whether voters can choose multiple options"
+											},
 											"options": {
 												"type": "array",
-												"items": {"type": "string"},
+												"items": {
+													"type": "string"
+												},
 												"description": "The available options in the poll"
 											},
 											"closed_in": {
@@ -1865,7 +4335,9 @@
 											}
 										}
 									},
-									"sensitive": {"type": "boolean"}
+									"sensitive": {
+										"type": "boolean"
+									}
 								}
 							}
 						}
@@ -1878,16 +4350,24 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["id"],
+									"required": [
+										"id"
+									],
 									"properties": {
-										"id": {"type": "integer"}
+										"id": {
+											"type": "integer"
+										}
 									}
 								}
 							}
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/posts/{postID}": {
@@ -1898,15 +4378,21 @@
 						"name": "postID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "include_your",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"}
+						"schema": {
+							"type": "boolean"
+						}
 					},
-					{"$ref": "#/components/parameters/image_handling"}
+					{
+						"$ref": "#/components/parameters/image_handling"
+					}
 				],
 				"responses": {
 					"200": {
@@ -1914,28 +4400,61 @@
 						"content": {
 							"application/json": {
 								"schema": {
-									"allOf": [{"$ref": "#/components/schemas/SomePostInfo"}],
+									"allOf": [
+										{
+											"$ref": "#/components/schemas/SomePostInfo"
+										}
+									],
 									"type": "object",
-									"required": ["approved", "local", "rejected", "poll"],
+									"required": [
+										"approved",
+										"local",
+										"rejected",
+										"poll"
+									],
 									"properties": {
-										"approved": {"type": "boolean"},
-										"local": {"type": "boolean"},
-										"rejected": {"type": "boolean"},
+										"approved": {
+											"type": "boolean"
+										},
+										"local": {
+											"type": "boolean"
+										},
+										"rejected": {
+											"type": "boolean"
+										},
 										"poll": {
 											"nullable": true,
 											"type": "object",
-											"required": ["multiple", "options", "closed_at", "is_closed"],
+											"required": [
+												"multiple",
+												"options",
+												"closed_at",
+												"is_closed"
+											],
 											"properties": {
-												"multiple": {"type": "boolean", "description": "Whether voters can choose multiple options"},
+												"multiple": {
+													"type": "boolean",
+													"description": "Whether voters can choose multiple options"
+												},
 												"options": {
 													"type": "array",
 													"items": {
 														"type": "object",
-														"required": ["id", "name", "votes"],
+														"required": [
+															"id",
+															"name",
+															"votes"
+														],
 														"properties": {
-															"id": {"type": "integer"},
-															"name": {"type": "string"},
-															"votes": {"type": "integer"}
+															"id": {
+																"type": "integer"
+															},
+															"name": {
+																"type": "string"
+															},
+															"votes": {
+																"type": "integer"
+															}
 														}
 													}
 												},
@@ -1951,15 +4470,21 @@
 												"your_vote": {
 													"nullable": true,
 													"type": "object",
-													"required": ["options"],
+													"required": [
+														"options"
+													],
 													"properties": {
 														"options": {
 															"type": "array",
 															"items": {
 																"type": "object",
-																"required": ["id"],
+																"required": [
+																	"id"
+																],
 																"properties": {
-																	"id": {"type": "integer"}
+																	"id": {
+																		"type": "integer"
+																	}
 																}
 															}
 														}
@@ -1973,7 +4498,11 @@
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			},
 			"delete": {
 				"summary": "Delete a post",
@@ -1982,7 +4511,9 @@
 						"name": "postID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
@@ -1990,7 +4521,11 @@
 						"description": "Successfully deleted."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/posts/{postID}/flags": {
@@ -2001,7 +4536,9 @@
 						"name": "postID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"requestBody": {
@@ -2010,12 +4547,23 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["to_community", "to_site_admin"],
+								"required": [
+									"to_community",
+									"to_site_admin"
+								],
 								"properties": {
-									"content_text": {"type": "string"},
-									"to_community": {"type": "boolean"},
-									"to_site_admin": {"type": "boolean"},
-									"to_remote_site_admin": {"type": "boolean"}
+									"content_text": {
+										"type": "string"
+									},
+									"to_community": {
+										"type": "boolean"
+									},
+									"to_site_admin": {
+										"type": "boolean"
+									},
+									"to_remote_site_admin": {
+										"type": "boolean"
+									}
 								}
 							}
 						}
@@ -2033,7 +4581,11 @@
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/posts/{postID}/poll/your_vote": {
@@ -2044,7 +4596,9 @@
 						"name": "postID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"requestBody": {
@@ -2055,16 +4609,27 @@
 								"oneOf": [
 									{
 										"type": "object",
-										"required": ["options"],
+										"required": [
+											"options"
+										],
 										"properties": {
-											"options": {"type": "array", "items": {"type": "integer"}}
+											"options": {
+												"type": "array",
+												"items": {
+													"type": "integer"
+												}
+											}
 										}
 									},
 									{
 										"type": "object",
-										"required": ["option"],
+										"required": [
+											"option"
+										],
 										"properties": {
-											"option": {"type": "integer"}
+											"option": {
+												"type": "integer"
+											}
 										}
 									}
 								]
@@ -2087,32 +4652,44 @@
 						"name": "postID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "include_your",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"}
+						"schema": {
+							"type": "boolean"
+						}
 					},
-					{"$ref": "#/components/parameters/image_handling"},
+					{
+						"$ref": "#/components/parameters/image_handling"
+					},
 					{
 						"name": "limit",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "sort",
 						"in": "query",
 						"required": false,
-						"schema": {"$ref": "#/components/schemas/SortType"}
+						"schema": {
+							"$ref": "#/components/schemas/SortType"
+						}
 					},
 					{
 						"name": "page",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {
@@ -2122,7 +4699,10 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
@@ -2148,7 +4728,9 @@
 						"name": "postID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"requestBody": {
@@ -2158,13 +4740,19 @@
 							"schema": {
 								"type": "object",
 								"properties": {
-									"content_text": {"type": "string"},
-									"content_markdown": {"type": "string"},
+									"content_text": {
+										"type": "string"
+									},
+									"content_markdown": {
+										"type": "string"
+									},
 									"attachment": {
 										"type": "string",
 										"description": "Must be a `local-media://` reference"
 									},
-									"sensitive": {"type": "boolean"}
+									"sensitive": {
+										"type": "boolean"
+									}
 								}
 							}
 						}
@@ -2177,9 +4765,14 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["id", "post"],
+									"required": [
+										"id",
+										"post"
+									],
 									"properties": {
-										"id": {"type": "integer"}
+										"id": {
+											"type": "integer"
+										}
 									}
 								}
 							}
@@ -2196,13 +4789,17 @@
 						"name": "postID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "page",
 						"in": "query",
 						"required": true,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {
@@ -2212,15 +4809,22 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
 											"items": {
 												"type": "object",
-												"required": ["user"],
+												"required": [
+													"user"
+												],
 												"properties": {
-													"user": {"$ref": "#/components/schemas/MinimalUserInfo"}
+													"user": {
+														"$ref": "#/components/schemas/MinimalUserInfo"
+													}
 												}
 											}
 										},
@@ -2244,7 +4848,9 @@
 						"name": "postID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
@@ -2252,7 +4858,11 @@
 						"description": "Successfully liked."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			},
 			"delete": {
 				"summary": "Retract a like of a post",
@@ -2261,7 +4871,9 @@
 						"name": "postID",
 						"in": "path",
 						"required": true,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					}
 				],
 				"responses": {
@@ -2269,7 +4881,11 @@
 						"description": "Successfully unliked."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/users": {
@@ -2280,17 +4896,23 @@
 						"name": "local",
 						"in": "query",
 						"required": true,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "Filter by whether the user is local. Currently required to be true."
 					},
 					{
 						"name": "username",
 						"in": "query",
 						"required": true,
-						"schema": {"type": "string"},
+						"schema": {
+							"type": "string"
+						},
 						"description": "Filter by the user's name"
 					},
-					{"$ref": "#/components/parameters/image_handling"}
+					{
+						"$ref": "#/components/parameters/image_handling"
+					}
 				],
 				"responses": {
 					"200": {
@@ -2299,13 +4921,21 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
-											"items": {"$ref": "#/components/schemas/UserInfo"}
+											"items": {
+												"$ref": "#/components/schemas/UserInfo"
+											}
 										},
-										"next_page": {"type": "string", "nullable": true}
+										"next_page": {
+											"type": "string",
+											"nullable": true
+										}
 									}
 								}
 							}
@@ -2321,12 +4951,24 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["username", "password"],
+								"required": [
+									"username",
+									"password"
+								],
 								"properties": {
-									"username": {"type": "string"},
-									"password": {"type": "string"},
-									"email_address": {"type": "string", "format": "email"},
-									"invitation_key": {"type": "string"},
+									"username": {
+										"type": "string"
+									},
+									"password": {
+										"type": "string"
+									},
+									"email_address": {
+										"type": "string",
+										"format": "email"
+									},
+									"invitation_key": {
+										"type": "string"
+									},
 									"login": {
 										"type": "boolean",
 										"description": "If true, will also create a login token for the new user"
@@ -2343,7 +4985,9 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["user"],
+									"required": [
+										"user"
+									],
 									"properties": {
 										"user": {
 											"$ref": "#/components/schemas/LoginUserInfo"
@@ -2370,16 +5014,22 @@
 						"name": "userID",
 						"in": "path",
 						"required": true,
-						"schema": {"$ref": "#/components/schemas/PathUserID"}
+						"schema": {
+							"$ref": "#/components/schemas/PathUserID"
+						}
 					},
 					{
 						"name": "include_your",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "boolean"},
+						"schema": {
+							"type": "boolean"
+						},
 						"description": "If true, will fetch your_note"
 					},
-					{"$ref": "#/components/parameters/image_handling"}
+					{
+						"$ref": "#/components/parameters/image_handling"
+					}
 				],
 				"responses": {
 					"200": {
@@ -2393,7 +5043,199 @@
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/users/{userID}/follow": {
+			"post": {
+				"summary": "Follow a user",
+				"description": "Creates a local person follow and delivers a signed ActivityPub Follow when the target user is remote.",
+				"parameters": [
+					{
+						"name": "userID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathUserID"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"try_wait_for_accept": {
+										"type": "boolean",
+										"description": "If true, briefly waits before responding to give the remote server time to send an Accept."
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/YourFollowInfo"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/users/{userID}/messages": {
+			"get": {
+				"summary": "List private messages for the current user",
+				"description": "When conversations=true and with_user is omitted, returns the latest visible message for each conversation partner. Otherwise returns private messages in reverse chronological order, optionally filtered to one participant.",
+				"parameters": [
+					{
+						"name": "userID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathUserID"
+						}
+					},
+					{
+						"name": "with_user",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "integer"
+						},
+						"description": "Only include messages exchanged with this user id."
+					},
+					{
+						"name": "conversations",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "boolean",
+							"default": false
+						},
+						"description": "Return one latest message per visible conversation partner. Ignored when with_user is supplied."
+					},
+					{
+						"$ref": "#/components/parameters/image_handling"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/PrivateMessageList"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			},
+			"post": {
+				"summary": "Create a private message",
+				"description": "Stores a local private message. For remote recipients, queues signed ActivityPub delivery using Note or ChatMessage depending on the conversation shape.",
+				"parameters": [
+					{
+						"name": "userID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathUserID"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"$ref": "#/components/schemas/PrivateMessageCreate"
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/PrivateMessageInfo"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/users/{userID}/messages:dismiss": {
+			"post": {
+				"summary": "Dismiss a private-message conversation",
+				"description": "Hides a conversation from the conversation-summary list until a newer message arrives. Messages are not deleted.",
+				"parameters": [
+					{
+						"name": "userID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathUserID"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"$ref": "#/components/schemas/PrivateMessageDismiss"
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/PrivateMessageDismissResult"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/users/{userID}/things": {
@@ -2404,20 +5246,28 @@
 						"name": "userID",
 						"in": "path",
 						"required": true,
-						"schema": {"$ref": "#/components/schemas/PathUserID"}
+						"schema": {
+							"$ref": "#/components/schemas/PathUserID"
+						}
 					},
-					{"$ref": "#/components/parameters/image_handling"},
+					{
+						"$ref": "#/components/parameters/image_handling"
+					},
 					{
 						"name": "limit",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "integer"}
+						"schema": {
+							"type": "integer"
+						}
 					},
 					{
 						"name": "page",
 						"in": "query",
 						"required": false,
-						"schema": {"type": "string"}
+						"schema": {
+							"type": "string"
+						}
 					}
 				],
 				"responses": {
@@ -2427,7 +5277,10 @@
 							"application/json": {
 								"schema": {
 									"type": "object",
-									"required": ["items", "next_page"],
+									"required": [
+										"items",
+										"next_page"
+									],
 									"properties": {
 										"items": {
 											"type": "array",
@@ -2435,18 +5288,48 @@
 												"oneOf": [
 													{
 														"type": "object",
-														"required": ["type", "id", "content_text", "content_html", "created", "post", "sensitive"],
+														"required": [
+															"type",
+															"id",
+															"content_text",
+															"content_html",
+															"created",
+															"post",
+															"sensitive"
+														],
 														"properties": {
-															"type": {"type": "string", "enum": ["comment"]},
-															"id": {"type": "integer"},
-															"content_text": {"type": "string", "nullable": true},
-															"content_html": {"type": "string", "nullable": true},
-															"sensitive": {"type": "boolean"},
-															"created": {"type": "string", "format": "date-time"},
-															"post": {"$ref": "#/components/schemas/MinimalPostInfo"}
+															"type": {
+																"type": "string",
+																"enum": [
+																	"comment"
+																]
+															},
+															"id": {
+																"type": "integer"
+															},
+															"content_text": {
+																"type": "string",
+																"nullable": true
+															},
+															"content_html": {
+																"type": "string",
+																"nullable": true
+															},
+															"sensitive": {
+																"type": "boolean"
+															},
+															"created": {
+																"type": "string",
+																"format": "date-time"
+															},
+															"post": {
+																"$ref": "#/components/schemas/MinimalPostInfo"
+															}
 														}
 													},
-													{"$ref": "#/components/schemas/SomePostInfo"}
+													{
+														"$ref": "#/components/schemas/SomePostInfo"
+													}
 												]
 											}
 										},
@@ -2462,6 +5345,32 @@
 				}
 			}
 		},
+		"/api/unstable/users/{userID}/unfollow": {
+			"post": {
+				"summary": "Unfollow a user",
+				"description": "Removes a local person follow and queues a signed ActivityPub Undo when the target user is remote.",
+				"parameters": [
+					{
+						"name": "userID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathUserID"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Successfully unfollowed."
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
 		"/api/unstable/users/{userID}/your_note": {
 			"put": {
 				"summary": "Edit your personal note for a user",
@@ -2470,7 +5379,9 @@
 						"name": "userID",
 						"in": "path",
 						"required": true,
-						"schema": {"$ref": "#/components/schemas/PathUserID"}
+						"schema": {
+							"$ref": "#/components/schemas/PathUserID"
+						}
 					}
 				],
 				"requestBody": {
@@ -2479,9 +5390,13 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["content_text"],
+								"required": [
+									"content_text"
+								],
 								"properties": {
-									"content_text": {"type": "string"}
+									"content_text": {
+										"type": "string"
+									}
 								}
 							}
 						}
@@ -2492,7 +5407,11 @@
 						"description": "Successfully set."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/users/~me": {
@@ -2505,12 +5424,27 @@
 							"schema": {
 								"type": "object",
 								"properties": {
-									"description_text": {"type": "string"},
-									"description_markdown": {"type": "string"},
-									"description_html": {"type": "string"},
-									"email_address": {"type": "string", "format": "email"},
-									"password": {"type": "string", "format": "password"},
-									"avatar": {"type": "string", "description": "User profile image. Must be a `local-media://` link"}
+									"description_text": {
+										"type": "string"
+									},
+									"description_markdown": {
+										"type": "string"
+									},
+									"description_html": {
+										"type": "string"
+									},
+									"email_address": {
+										"type": "string",
+										"format": "email"
+									},
+									"password": {
+										"type": "string",
+										"format": "password"
+									},
+									"avatar": {
+										"type": "string",
+										"description": "User profile image. Must be a `local-media://` link"
+									}
 								}
 							}
 						}
@@ -2521,14 +5455,20 @@
 						"description": "Successfully modified."
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/users/~me/notifications": {
 			"get": {
 				"summary": "Fetch your notifications. Will also clear `has_unread_notifications`.",
 				"parameters": [
-					{"$ref": "#/components/parameters/image_handling"}
+					{
+						"$ref": "#/components/parameters/image_handling"
+					}
 				],
 				"responses": {
 					"200": {
@@ -2536,60 +5476,17 @@
 						"content": {
 							"application/json": {
 								"schema": {
-									"type": "object",
-									"required": ["items", "next_page"],
-									"properties": {
-										"items": {
-											"type": "array",
-											"items": {
-												"allOf": [
-													{
-														"type": "object",
-														"required": ["unseen"],
-														"properties": {
-															"unseen": {
-																"type": "boolean",
-																"description": "Whether this notification was generated since the last time notifications were checked."
-															}
-														}
-													},
-													{
-														"oneOf": [
-															{
-																"type": "object",
-																"required": ["type", "reply", "post"],
-																"properties": {
-																	"type": {"type": "string", "enum": ["post_reply"]},
-																	"reply": {"$ref": "#/components/schemas/PostCommentInfo"},
-																	"post": {"$ref": "#/components/schemas/PostListPost"}
-																}
-															},
-															{
-																"type": "object",
-																"required": ["type", "reply", "post", "comment"],
-																"properties": {
-																	"type": {"type": "string", "enum": ["comment_reply"]},
-																	"reply": {"$ref": "#/components/schemas/PostCommentInfo"},
-																	"comment": {"$ref": "#/components/schemas/PostCommentInfo"},
-																	"post": {"$ref": "#/components/schemas/PostListPost"}
-																}
-															}
-														]
-													}
-												]
-											}
-										},
-										"next_page": {
-											"type": "string",
-											"nullable": true
-										}
-									}
+									"$ref": "#/components/schemas/NotificationList"
 								}
 							}
 						}
 					}
 				},
-				"security": [{"bearer": []}]
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		},
 		"/api/unstable/users/~me/notifications:subscriptions": {
@@ -2602,11 +5499,18 @@
 						"application/json": {
 							"schema": {
 								"type": "object",
-								"required": ["type", "endpoint", "p256dh_key", "auth_key"],
+								"required": [
+									"type",
+									"endpoint",
+									"p256dh_key",
+									"auth_key"
+								],
 								"properties": {
 									"type": {
 										"type": "string",
-										"enum": ["web_push"]
+										"enum": [
+											"web_push"
+										]
 									},
 									"endpoint": {
 										"type": "string"
@@ -2627,6 +5531,750 @@
 						"description": "Browser push notifications are not available in this build"
 					}
 				}
+			}
+		},
+		"/api/unstable/objects:lookup/{remoteID}": {
+			"get": {
+				"summary": "Look up a remote ActivityPub object by WebFinger or ActivityPub ID",
+				"description": "Fetches and ingests a remote actor, post, comment, or source-like collection target, then returns local references created or found from that object.",
+				"parameters": [
+					{
+						"name": "remoteID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						},
+						"description": "WebFinger handle or ActivityPub object URL. URL values must be percent-encoded as a path segment."
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "array",
+									"items": {
+										"$ref": "#/components/schemas/ThingLocalRef"
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		"/api/unstable/objects:blocks/{remoteID}": {
+			"put": {
+				"summary": "Block and purge a remote ActivityPub object",
+				"description": "Site-admin endpoint used by Hitide to block a remote AP ID and remove local rows tied to that exact object.",
+				"parameters": [
+					{
+						"name": "remoteID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "string"
+						},
+						"description": "WebFinger handle or ActivityPub object URL. URL values must be percent-encoded as a path segment."
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Successfully blocked."
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/communities/unfollow_inactive": {
+			"post": {
+				"summary": "Unfollow followed remote communities with no known posts",
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/UnfollowInactiveCommunitiesResult"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/collection_targets": {
+			"get": {
+				"summary": "List source-like ActivityPub collection targets",
+				"description": "Collection targets cover federated sources that are not normal group actors, such as Funkwhale libraries and other source/catalog style feeds.",
+				"parameters": [
+					{
+						"name": "search",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string"
+						},
+						"description": "Search names, AP IDs, owner AP IDs, software labels, hosts, and latest preview item titles."
+					},
+					{
+						"name": "include_your",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "boolean"
+						},
+						"description": "Include follow status for the authenticated user."
+					},
+					{
+						"name": "limit",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "integer"
+						},
+						"description": "Maximum returned rows. The backend clamps this to 1 through 150."
+					},
+					{
+						"name": "page_number",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "integer"
+						}
+					},
+					{
+						"name": "scope",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"enum": [
+								"mine",
+								"everything"
+							]
+						}
+					},
+					{
+						"name": "software",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string"
+						},
+						"description": "Optional software/source family filter."
+					},
+					{
+						"name": "sort",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "string",
+							"enum": [
+								"alphabetic",
+								"latest",
+								"items",
+								"software"
+							]
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/CollectionTargetList"
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		"/api/unstable/collection_targets/{collectionTargetID}": {
+			"get": {
+				"summary": "Fetch a source-like ActivityPub collection target",
+				"parameters": [
+					{
+						"name": "collectionTargetID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathCollectionTargetID"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/CollectionTargetInfo"
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		"/api/unstable/collection_targets/{collectionTargetID}/items/{itemID}": {
+			"get": {
+				"summary": "Fetch one cached item from a source-like ActivityPub collection target",
+				"parameters": [
+					{
+						"name": "collectionTargetID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathCollectionTargetID"
+						}
+					},
+					{
+						"name": "itemID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "integer",
+							"format": "int64"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/CollectionTargetItemInfo"
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		"/api/unstable/collection_targets/{collectionTargetID}/items/{itemID}/comments": {
+			"post": {
+				"summary": "Reply to one cached item from a source-like ActivityPub collection target",
+				"parameters": [
+					{
+						"name": "collectionTargetID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathCollectionTargetID"
+						}
+					},
+					{
+						"name": "itemID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "integer",
+							"format": "int64"
+						}
+					}
+				],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"content_text": {
+										"type": "string"
+									},
+									"content_markdown": {
+										"type": "string"
+									},
+									"sensitive": {
+										"type": "boolean"
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "Reply created.",
+						"content": {
+							"application/json": {
+								"schema": {
+									"type": "object",
+									"required": [
+										"id"
+									],
+									"properties": {
+										"id": {
+											"type": "integer",
+											"format": "int64"
+										}
+									}
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/collection_targets/{collectionTargetID}/items/{itemID}/your_vote": {
+			"put": {
+				"summary": "Like one cached item from a source-like ActivityPub collection target",
+				"parameters": [
+					{
+						"name": "collectionTargetID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathCollectionTargetID"
+						}
+					},
+					{
+						"name": "itemID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "integer",
+							"format": "int64"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Like accepted."
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			},
+			"delete": {
+				"summary": "Remove a Like from one cached item from a source-like ActivityPub collection target",
+				"parameters": [
+					{
+						"name": "collectionTargetID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathCollectionTargetID"
+						}
+					},
+					{
+						"name": "itemID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"type": "integer",
+							"format": "int64"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Unlike accepted."
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/collection_targets/{collectionTargetID}/follow": {
+			"post": {
+				"summary": "Follow a source-like ActivityPub collection target",
+				"parameters": [
+					{
+						"name": "collectionTargetID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathCollectionTargetID"
+						}
+					}
+				],
+				"requestBody": {
+					"required": false,
+					"content": {
+						"application/json": {
+							"schema": {
+								"type": "object",
+								"properties": {
+									"try_wait_for_accept": {
+										"type": "boolean",
+										"description": "Briefly wait before responding to give the remote server time to send an Accept."
+									}
+								}
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/YourFollowInfo"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/collection_targets/{collectionTargetID}/unfollow": {
+			"post": {
+				"summary": "Unfollow a source-like ActivityPub collection target",
+				"parameters": [
+					{
+						"name": "collectionTargetID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathCollectionTargetID"
+						}
+					}
+				],
+				"responses": {
+					"202": {
+						"description": "Unfollow accepted."
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/instance/federation": {
+			"get": {
+				"summary": "Fetch federation health and discovery diagnostics",
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/AdminFederationHealth"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/instance/federation/tasks/{taskID}/retry": {
+			"post": {
+				"summary": "Retry a replayable failed federation task",
+				"parameters": [
+					{
+						"name": "taskID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathTaskID"
+						}
+					}
+				],
+				"responses": {
+					"204": {
+						"description": "Task queued for retry."
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/instance/stylesheet": {
+			"post": {
+				"summary": "Upload the site stylesheet",
+				"requestBody": {
+					"required": true,
+					"content": {
+						"text/css": {
+							"schema": {
+								"type": "string",
+								"format": "binary"
+							}
+						},
+						"text/plain": {
+							"schema": {
+								"type": "string",
+								"format": "binary"
+							}
+						},
+						"application/octet-stream": {
+							"schema": {
+								"type": "string",
+								"format": "binary"
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/JustURL"
+								}
+							}
+						}
+					},
+					"413": {
+						"description": "Stylesheet upload is too large."
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			},
+			"delete": {
+				"summary": "Remove the uploaded site stylesheet",
+				"responses": {
+					"204": {
+						"description": "Stylesheet removed."
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/stable/instance/logo": {
+			"get": {
+				"summary": "Fetch the configured site logo",
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/octet-stream": {
+								"schema": {
+									"type": "string",
+									"format": "binary"
+								}
+							}
+						}
+					},
+					"302": {
+						"description": "Configured logo is an external URL."
+					},
+					"404": {
+						"description": "No site logo is configured."
+					}
+				}
+			}
+		},
+		"/api/stable/instance/stylesheet": {
+			"get": {
+				"summary": "Fetch the configured site stylesheet",
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"text/css": {
+								"schema": {
+									"type": "string",
+									"format": "binary"
+								}
+							}
+						}
+					},
+					"404": {
+						"description": "No site stylesheet is configured."
+					}
+				}
+			}
+		},
+		"/api/stable/users/{userID}/avatar/href": {
+			"get": {
+				"summary": "Fetch or redirect to a user avatar",
+				"parameters": [
+					{
+						"name": "userID",
+						"in": "path",
+						"required": true,
+						"schema": {
+							"$ref": "#/components/schemas/PathUserID"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/octet-stream": {
+								"schema": {
+									"type": "string",
+									"format": "binary"
+								}
+							}
+						}
+					},
+					"302": {
+						"description": "The avatar is an external URL."
+					},
+					"404": {
+						"description": "No avatar is configured for the user."
+					}
+				}
+			}
+		},
+		"/api/unstable/users/~me/messages": {
+			"get": {
+				"summary": "List private messages for the current user",
+				"description": "When conversations=true and with_user is omitted, returns the latest visible message for each conversation partner. Otherwise returns private messages in reverse chronological order, optionally filtered to one participant.",
+				"parameters": [
+					{
+						"name": "with_user",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "integer"
+						},
+						"description": "Only include messages exchanged with this user id."
+					},
+					{
+						"name": "conversations",
+						"in": "query",
+						"required": false,
+						"schema": {
+							"type": "boolean",
+							"default": false
+						},
+						"description": "Return one latest message per visible conversation partner. Ignored when with_user is supplied."
+					},
+					{
+						"$ref": "#/components/parameters/image_handling"
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/PrivateMessageList"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			},
+			"post": {
+				"summary": "Create a private message",
+				"description": "Stores a local private message. For remote recipients, queues signed ActivityPub delivery using Note or ChatMessage depending on the conversation shape.",
+				"parameters": [],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"$ref": "#/components/schemas/PrivateMessageCreate"
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/PrivateMessageInfo"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
+			}
+		},
+		"/api/unstable/users/~me/messages:dismiss": {
+			"post": {
+				"summary": "Dismiss a private-message conversation",
+				"description": "Hides a conversation from the conversation-summary list until a newer message arrives. Messages are not deleted.",
+				"parameters": [],
+				"requestBody": {
+					"required": true,
+					"content": {
+						"application/json": {
+							"schema": {
+								"$ref": "#/components/schemas/PrivateMessageDismiss"
+							}
+						}
+					}
+				},
+				"responses": {
+					"200": {
+						"description": "",
+						"content": {
+							"application/json": {
+								"schema": {
+									"$ref": "#/components/schemas/PrivateMessageDismissResult"
+								}
+							}
+						}
+					}
+				},
+				"security": [
+					{
+						"bearer": []
+					}
+				]
 			}
 		}
 	}

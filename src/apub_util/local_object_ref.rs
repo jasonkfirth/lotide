@@ -1,9 +1,10 @@
-use super::{try_strip_host, ApIdRef};
-use crate::types::{
-    CollectionTargetLocalID, CommentLocalID, CommunityLocalID, PollLocalID, PollOptionLocalID,
-    PostLocalID, UserLocalID,
-};
+use super::{ApIdRef, try_strip_host};
 use crate::BaseURL;
+use crate::types::{
+    CollectionTargetItemCommentLocalID, CollectionTargetItemLocalID, CollectionTargetLocalID,
+    CommentLocalID, CommunityLocalID, PollLocalID, PollOptionLocalID, PostLocalID,
+    PrivateMessageLocalID, UserLocalID,
+};
 
 type RefRouteNode<P> = trout::Node<P, String, LocalObjectRef, ()>;
 
@@ -29,6 +30,29 @@ lazy_static::lazy_static! {
                     .with_child_parse::<CollectionTargetLocalID, _>(
                         RefRouteNode::new()
                             .with_handler((), |(target,), (), _| LocalObjectRef::CollectionTarget(target))
+                            .with_child(
+                                "items",
+                                RefRouteNode::new()
+                                    .with_child_parse::<CollectionTargetItemLocalID, _>(
+                                        RefRouteNode::new()
+                                            .with_handler((), |(target, item), (), _| LocalObjectRef::CollectionTargetItem(target, item))
+                                            .with_child(
+                                                "comments",
+                                                RefRouteNode::new()
+                                                    .with_child_parse::<CollectionTargetItemCommentLocalID, _>(
+                                                        RefRouteNode::new().with_handler((), |(target, item, comment), (), _| LocalObjectRef::CollectionTargetItemComment(target, item, comment))
+                                                    )
+                                            )
+                                            .with_child(
+                                                "likes",
+                                                RefRouteNode::new()
+                                                    .with_handler((), |(target, item), (), _| LocalObjectRef::CollectionTargetItemLikes(target, item))
+                                                    .with_child_parse::<UserLocalID, _>(
+                                                        RefRouteNode::new().with_handler((), |(target, item, user), (), _| LocalObjectRef::CollectionTargetItemLike(target, item, user))
+                                                    )
+                                            )
+                                    )
+                            )
                             .with_child(
                                 "followers",
                                 RefRouteNode::new()
@@ -78,6 +102,13 @@ lazy_static::lazy_static! {
                     )
             )
             .with_child("inbox", RefRouteNode::new().with_handler((), |(), (), _| LocalObjectRef::SharedInbox))
+            .with_child(
+                "private_messages",
+                RefRouteNode::new()
+                    .with_child_parse::<PrivateMessageLocalID, _>(
+                        RefRouteNode::new().with_handler((), |(message,), (), _| LocalObjectRef::PrivateMessage(message))
+                    )
+            )
             .with_child("polls", RefRouteNode::new().with_child_parse::<PollLocalID, _>(
                     RefRouteNode::new().with_child(
                         "voters",
@@ -148,6 +179,18 @@ pub enum LocalObjectRef {
     CommentLikes(CommentLocalID),
     CommentLike(CommentLocalID, UserLocalID),
     CollectionTarget(CollectionTargetLocalID),
+    CollectionTargetItem(CollectionTargetLocalID, CollectionTargetItemLocalID),
+    CollectionTargetItemComment(
+        CollectionTargetLocalID,
+        CollectionTargetItemLocalID,
+        CollectionTargetItemCommentLocalID,
+    ),
+    CollectionTargetItemLikes(CollectionTargetLocalID, CollectionTargetItemLocalID),
+    CollectionTargetItemLike(
+        CollectionTargetLocalID,
+        CollectionTargetItemLocalID,
+        UserLocalID,
+    ),
     CollectionTargetFollowers(CollectionTargetLocalID),
     CollectionTargetFollow(CollectionTargetLocalID, UserLocalID),
     Community(CommunityLocalID),
@@ -162,6 +205,7 @@ pub enum LocalObjectRef {
     Post(PostLocalID),
     PostLikes(PostLocalID),
     PostLike(PostLocalID, UserLocalID),
+    PrivateMessage(PrivateMessageLocalID),
     SharedInbox,
     User(UserLocalID),
     UserFollowers(UserLocalID),
@@ -219,6 +263,31 @@ impl LocalObjectRef {
                 let mut res = host_url_apub.clone();
                 res.path_segments_mut()
                     .extend(&["collection_targets", &target.to_string()]);
+                res
+            }
+            LocalObjectRef::CollectionTargetItem(target, item) => {
+                let mut res = LocalObjectRef::CollectionTarget(target).to_local_uri(host_url_apub);
+                res.path_segments_mut()
+                    .extend(&["items", &item.to_string()]);
+                res
+            }
+            LocalObjectRef::CollectionTargetItemComment(target, item, comment) => {
+                let mut res =
+                    LocalObjectRef::CollectionTargetItem(target, item).to_local_uri(host_url_apub);
+                res.path_segments_mut()
+                    .extend(&["comments", &comment.to_string()]);
+                res
+            }
+            LocalObjectRef::CollectionTargetItemLikes(target, item) => {
+                let mut res =
+                    LocalObjectRef::CollectionTargetItem(target, item).to_local_uri(host_url_apub);
+                res.path_segments_mut().push("likes");
+                res
+            }
+            LocalObjectRef::CollectionTargetItemLike(target, item, user) => {
+                let mut res = LocalObjectRef::CollectionTargetItemLikes(target, item)
+                    .to_local_uri(host_url_apub);
+                res.path_segments_mut().push(&user.to_string());
                 res
             }
             LocalObjectRef::CollectionTargetFollowers(target) => {
@@ -302,6 +371,12 @@ impl LocalObjectRef {
             LocalObjectRef::PostLike(post, user) => {
                 let mut res = LocalObjectRef::PostLikes(post).to_local_uri(host_url_apub);
                 res.path_segments_mut().push(&user.to_string());
+                res
+            }
+            LocalObjectRef::PrivateMessage(message) => {
+                let mut res = host_url_apub.clone();
+                res.path_segments_mut()
+                    .extend(&["private_messages", &message.to_string()]);
                 res
             }
             LocalObjectRef::SharedInbox => {
@@ -427,6 +502,68 @@ mod tests {
                 CollectionTargetLocalID(15),
                 UserLocalID(7)
             ))
+        ));
+    }
+
+    #[test]
+    fn collection_target_item_like_refs_round_trip() {
+        let host_url_apub: crate::BaseURL = "https://lotide.example/apub".parse().unwrap();
+
+        let comment = LocalObjectRef::CollectionTargetItemComment(
+            CollectionTargetLocalID(15),
+            CollectionTargetItemLocalID(44),
+            CollectionTargetItemCommentLocalID(6),
+        )
+        .to_local_uri(&host_url_apub);
+
+        assert_eq!(
+            comment.as_str(),
+            "https://lotide.example/apub/collection_targets/15/items/44/comments/6"
+        );
+        assert!(matches!(
+            LocalObjectRef::try_from_uri(&comment, &host_url_apub),
+            Some(LocalObjectRef::CollectionTargetItemComment(
+                CollectionTargetLocalID(15),
+                CollectionTargetItemLocalID(44),
+                CollectionTargetItemCommentLocalID(6)
+            ))
+        ));
+
+        let like = LocalObjectRef::CollectionTargetItemLike(
+            CollectionTargetLocalID(15),
+            CollectionTargetItemLocalID(44),
+            UserLocalID(7),
+        )
+        .to_local_uri(&host_url_apub);
+
+        assert_eq!(
+            like.as_str(),
+            "https://lotide.example/apub/collection_targets/15/items/44/likes/7"
+        );
+        assert!(matches!(
+            LocalObjectRef::try_from_uri(&like, &host_url_apub),
+            Some(LocalObjectRef::CollectionTargetItemLike(
+                CollectionTargetLocalID(15),
+                CollectionTargetItemLocalID(44),
+                UserLocalID(7)
+            ))
+        ));
+    }
+
+    #[test]
+    fn private_message_refs_round_trip() {
+        let host_url_apub: crate::BaseURL = "https://lotide.example/apub".parse().unwrap();
+
+        let message =
+            LocalObjectRef::PrivateMessage(PrivateMessageLocalID(91)).to_local_uri(&host_url_apub);
+
+        assert_eq!(
+            message.as_str(),
+            "https://lotide.example/apub/private_messages/91"
+        );
+        assert!(matches!(
+            LocalObjectRef::try_from_uri(&message, &host_url_apub),
+            Some(LocalObjectRef::PrivateMessage(PrivateMessageLocalID(91)))
         ));
     }
 }

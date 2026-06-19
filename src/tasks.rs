@@ -1,7 +1,8 @@
 use crate::hyper;
 use crate::types::{
-    ActorLocalRef, CollectionTargetLocalID, CommentLocalID, CommunityLocalID, NotificationID,
-    NotificationSubscriptionID, PostLocalID, UserLocalID,
+    ActorLocalRef, CollectionTargetItemLocalID, CollectionTargetLocalID, CommentLocalID,
+    CommunityLocalID, ImageHandling, NotificationID, NotificationSubscriptionID, PostLocalID,
+    UserLocalID,
 };
 
 use async_trait::async_trait;
@@ -735,6 +736,11 @@ enum DeliveredFollowUndo {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeliveredLikeUndo {
+    CollectionTargetItem(uuid::Uuid),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeliveredFollowAccept {
     User(UserLocalID, UserLocalID),
 }
@@ -812,6 +818,28 @@ fn delivered_local_follow_undo(
     }
 }
 
+fn delivered_local_like_undo(
+    object: &str,
+    host_url_apub: &crate::BaseURL,
+) -> Option<DeliveredLikeUndo> {
+    let object: serde_json::Value = serde_json::from_str(object).ok()?;
+
+    if object.get("type")?.as_str()? != "Undo" {
+        return None;
+    }
+
+    let id = object.get("id")?.as_str()?;
+    let path = crate::apub_util::try_strip_host(id, host_url_apub)?;
+    let mut segments = path.trim_start_matches('/').split('/');
+
+    match (segments.next(), segments.next(), segments.next()) {
+        (Some("collection_target_item_like_undos"), Some(id), None) => uuid::Uuid::parse_str(id)
+            .ok()
+            .map(DeliveredLikeUndo::CollectionTargetItem),
+        _ => None,
+    }
+}
+
 fn delivered_local_follow_accept(
     object: &str,
     host_url_apub: &crate::BaseURL,
@@ -862,7 +890,9 @@ fn delivered_local_create_object(
     match crate::apub_util::LocalObjectRef::try_from_uri(object_id, host_url_apub) {
         Some(
             local_ref @ (crate::apub_util::LocalObjectRef::Post(_)
-            | crate::apub_util::LocalObjectRef::Comment(_)),
+            | crate::apub_util::LocalObjectRef::Comment(_)
+            | crate::apub_util::LocalObjectRef::CollectionTargetItemComment(_, _, _)
+            | crate::apub_util::LocalObjectRef::PrivateMessage(_)),
         ) => Some(local_ref),
         _ => None,
     }
@@ -883,7 +913,8 @@ fn delivered_local_like_object(
     match crate::apub_util::LocalObjectRef::try_from_uri(id, host_url_apub) {
         Some(
             local_ref @ (crate::apub_util::LocalObjectRef::PostLike(_, _)
-            | crate::apub_util::LocalObjectRef::CommentLike(_, _)),
+            | crate::apub_util::LocalObjectRef::CommentLike(_, _)
+            | crate::apub_util::LocalObjectRef::CollectionTargetItemLike(_, _, _)),
         ) => Some(local_ref),
         _ => None,
     }
@@ -921,6 +952,40 @@ async fn mark_local_create_delivery(
                 db.execute(
                     "UPDATE reply SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp) WHERE id=$1 AND local",
                     &[&comment_id],
+                )
+                .await?;
+            }
+        }
+        crate::apub_util::LocalObjectRef::CollectionTargetItemComment(
+            collection_target_id,
+            item_id,
+            comment_id,
+        ) => {
+            if received {
+                db.execute(
+                    "UPDATE collection_target_item_comment SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp), federation_received_at=COALESCE(federation_received_at, current_timestamp) WHERE id=$1 AND local AND item=$2 AND EXISTS (SELECT 1 FROM collection_target_item WHERE id=$2 AND collection_target=$3)",
+                    &[&comment_id, &item_id, &collection_target_id],
+                )
+                .await?;
+            } else {
+                db.execute(
+                    "UPDATE collection_target_item_comment SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp) WHERE id=$1 AND local AND item=$2 AND EXISTS (SELECT 1 FROM collection_target_item WHERE id=$2 AND collection_target=$3)",
+                    &[&comment_id, &item_id, &collection_target_id],
+                )
+                .await?;
+            }
+        }
+        crate::apub_util::LocalObjectRef::PrivateMessage(message_id) => {
+            if received {
+                db.execute(
+                    "UPDATE private_message SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp), federation_received_at=COALESCE(federation_received_at, current_timestamp) WHERE id=$1 AND local",
+                    &[&message_id],
+                )
+                .await?;
+            } else {
+                db.execute(
+                    "UPDATE private_message SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp) WHERE id=$1 AND local",
+                    &[&message_id],
                 )
                 .await?;
             }
@@ -967,7 +1032,52 @@ async fn mark_local_like_delivery(
                 .await?;
             }
         }
+        crate::apub_util::LocalObjectRef::CollectionTargetItemLike(
+            collection_target_id,
+            item_id,
+            user_id,
+        ) => {
+            if received {
+                db.execute(
+                    "UPDATE collection_target_item_like SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp), federation_received_at=COALESCE(federation_received_at, current_timestamp) WHERE item=$1 AND person=$2 AND local AND EXISTS (SELECT 1 FROM collection_target_item WHERE id=$1 AND collection_target=$3)",
+                    &[&item_id, &user_id, &collection_target_id],
+                )
+                .await?;
+            } else {
+                db.execute(
+                    "UPDATE collection_target_item_like SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp) WHERE item=$1 AND person=$2 AND local AND EXISTS (SELECT 1 FROM collection_target_item WHERE id=$1 AND collection_target=$3)",
+                    &[&item_id, &user_id, &collection_target_id],
+                )
+                .await?;
+            }
+        }
         _ => {}
+    }
+
+    Ok(())
+}
+
+async fn mark_local_like_undo_delivery(
+    db: &tokio_postgres::Client,
+    undo: DeliveredLikeUndo,
+    received: bool,
+) -> Result<(), crate::Error> {
+    match undo {
+        DeliveredLikeUndo::CollectionTargetItem(id) => {
+            if received {
+                db.execute(
+                    "UPDATE local_collection_target_item_like_undo SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp), federation_received_at=COALESCE(federation_received_at, current_timestamp) WHERE id=$1",
+                    &[&id],
+                )
+                .await?;
+            } else {
+                db.execute(
+                    "UPDATE local_collection_target_item_like_undo SET federation_sent_at=COALESCE(federation_sent_at, current_timestamp) WHERE id=$1",
+                    &[&id],
+                )
+                .await?;
+            }
+        }
     }
 
     Ok(())
@@ -1353,6 +1463,7 @@ impl TaskDef for DeliverToInbox<'_> {
             delivered_local_community_follow(&object, &ctx.host_url_apub);
         let delivered_follow = delivered_local_follow_object(&object, &ctx.host_url_apub);
         let delivered_follow_undo = delivered_local_follow_undo(&object, &ctx.host_url_apub);
+        let delivered_like_undo = delivered_local_like_undo(&object, &ctx.host_url_apub);
         let delivered_follow_accept = delivered_local_follow_accept(&object, &ctx.host_url_apub);
         let delivered_create = delivered_local_create_object(&object, &ctx.host_url_apub);
         let delivered_like = delivered_local_like_object(&object, &ctx.host_url_apub);
@@ -1422,6 +1533,9 @@ impl TaskDef for DeliverToInbox<'_> {
         }
         if let Some(undo) = delivered_follow_undo {
             mark_local_follow_undo_delivery(&db, undo, false).await?;
+        }
+        if let Some(undo) = delivered_like_undo {
+            mark_local_like_undo_delivery(&db, undo, false).await?;
         }
         if let Some(accept) = delivered_follow_accept {
             mark_local_follow_accept_delivery(&db, accept, false).await?;
@@ -1530,6 +1644,9 @@ impl TaskDef for DeliverToInbox<'_> {
         }
         if let Some(undo) = delivered_follow_undo {
             mark_local_follow_undo_delivery(&db, undo, true).await?;
+        }
+        if let Some(undo) = delivered_like_undo {
+            mark_local_like_undo_delivery(&db, undo, true).await?;
         }
         if let Some(accept) = delivered_follow_accept {
             mark_local_follow_accept_delivery(&db, accept, true).await?;
@@ -1904,17 +2021,14 @@ fn collection_target_preview_published(
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
 }
 
-fn collection_target_preview_item(
-    value: &serde_json::Value,
-) -> Option<CollectionTargetPreviewItem> {
-    /*
-        Followable collections are not threadiverse communities, but a short
-        cached item list lets users decide whether a library is worth following.
-        Funkwhale currently exposes Audio objects here; keep the parser generic
-        enough for other collection-shaped targets that use the same fields.
-    */
-    let ap_id = value_id_url(value)?.to_string();
-    let name = json_str_any(value, &["name"])
+fn collection_target_preview_source_content(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("source")
+        .and_then(|source| json_str_any(source, &["content"]))
+}
+
+fn collection_target_preview_explicit_name(value: &serde_json::Value) -> Option<&str> {
+    json_str_any(value, &["name"])
         .or_else(|| {
             value
                 .get("track")
@@ -1926,16 +2040,144 @@ fn collection_target_preview_item(
                 .and_then(|track| track.get("album"))
                 .and_then(|album| json_str_any(album, &["name"]))
         })
-        .unwrap_or("[no title]")
-        .to_owned();
+}
+
+fn collection_target_preview_item_name(
+    value: &serde_json::Value,
+    content_html: Option<&str>,
+    summary_html: Option<&str>,
+) -> String {
+    /*
+        Profile/source feeds often publish Notes without a name. Use the same
+        first-line fallback as posts so actor feeds from BookWyrm, Postmarks,
+        Misskey/Sharkey, and similar software do not show as anonymous blobs.
+    */
+    let title = crate::post_title_or_fallback(
+        collection_target_preview_explicit_name(value).unwrap_or_default(),
+        collection_target_preview_source_content(value),
+        None,
+        content_html.or(summary_html),
+    );
+
+    if title == "[no title]" {
+        collection_target_preview_empty_item_name(value)
+    } else {
+        decode_basic_html_entities(&title)
+    }
+}
+
+fn collection_target_preview_empty_item_name(value: &serde_json::Value) -> String {
+    /*
+        Actor-feed previews include some empty Notes from microblogging
+        software. On a source page, the remote host is still useful context,
+        and it is clearer than repeating "[no title]" down the list.
+    */
+    let Some(url) = value_id_url(value) else {
+        return "[no title]".to_owned();
+    };
+    let Some(host) = url.host_str().filter(|host| !host.is_empty()) else {
+        return "[no title]".to_owned();
+    };
+    let kind = json_str_any(value, &["type"])
+        .filter(|kind| !kind.trim().is_empty())
+        .unwrap_or("Item");
+    let host = host.strip_prefix("www.").unwrap_or(host);
+
+    format!("{kind} from {host}")
+}
+
+fn decode_basic_html_entities(src: &str) -> String {
+    let mut decoded = src.to_owned();
+
+    for _ in 0..2 {
+        let next = decode_basic_html_entities_once(&decoded);
+
+        if next == decoded {
+            break;
+        }
+
+        decoded = next;
+    }
+
+    decoded
+}
+
+fn decode_basic_html_entities_once(src: &str) -> String {
+    let mut output = String::with_capacity(src.len());
+    let mut rest = src;
+
+    while let Some(start) = rest.find('&') {
+        output.push_str(&rest[..start]);
+        let after_amp = &rest[start + 1..];
+
+        let Some(end) = after_amp.find(';').filter(|end| *end <= 16) else {
+            output.push('&');
+            rest = after_amp;
+            continue;
+        };
+
+        let entity = &after_amp[..end];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+                u32::from_str_radix(&entity[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            _ if entity.starts_with('#') => entity[1..].parse().ok().and_then(char::from_u32),
+            _ => None,
+        };
+
+        if let Some(decoded) = decoded {
+            output.push(decoded);
+        } else {
+            output.push('&');
+            output.push_str(entity);
+            output.push(';');
+        }
+
+        rest = &after_amp[end + 1..];
+    }
+
+    output.push_str(rest);
+    output
+}
+
+fn collection_target_preview_item(
+    value: &serde_json::Value,
+) -> Option<CollectionTargetPreviewItem> {
+    /*
+        Followable collections are not threadiverse communities, but a short
+        cached item list lets users decide whether a library is worth following.
+        Funkwhale currently exposes Audio objects here; keep the parser generic
+        enough for other collection-shaped targets that use the same fields.
+    */
+    let ap_id = value_id_url(value)?.to_string();
     let object_type = value
         .get("type")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
     let url = collection_target_preview_item_url(value).map(|url| url.to_string());
     let attributed_to = json_url_any(value, &["attributedTo"]).map(|url| url.to_string());
-    let content_html = json_str_any(value, &["content"]).map(str::to_owned);
-    let summary_html = json_str_any(value, &["summary"]).map(str::to_owned);
+    /*
+        Source items now have a native reader page. Preserve sanitized images
+        in the cached body so articles, photo posts, and media entries can be
+        viewed in Lotide first, with the original site still available as a
+        source link.
+    */
+    let content_html = json_str_any(value, &["content"])
+        .map(|html| crate::clean_html(html, ImageHandling::Preserve));
+    let summary_html = json_str_any(value, &["summary"])
+        .map(|html| crate::clean_html(html, ImageHandling::Preserve));
+    let name = collection_target_preview_item_name(
+        value,
+        content_html.as_deref(),
+        summary_html.as_deref(),
+    );
     let image_url = collection_target_preview_image_url(value).map(|url| url.to_string());
     let published = collection_target_preview_published(value);
 
@@ -1950,6 +2192,121 @@ fn collection_target_preview_item(
         image_url,
         published,
     })
+}
+
+pub async fn cache_collection_target_preview_item_from_value(
+    db: &tokio_postgres::Client,
+    collection_target: CollectionTargetLocalID,
+    value: &serde_json::Value,
+) -> Result<Option<CollectionTargetItemLocalID>, crate::Error> {
+    /*
+        Explicit source-object lookup
+
+        Some profile-oriented platforms expose useful ActivityPub objects but
+        publish empty or unpaged actor outboxes. Cache a looked-up object as a
+        source preview item only after the caller has already matched it to a
+        known collection target. This keeps the read path useful without
+        treating arbitrary remote notes as local posts.
+    */
+    let Some(item) = collection_target_preview_item(value) else {
+        return Ok(None);
+    };
+
+    let row = db
+        .query_one(
+            "INSERT INTO collection_target_item (
+                collection_target, ap_id, object_type, name, url, attributed_to,
+                content_html, summary_html, image_url, published, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, current_timestamp)
+            ON CONFLICT (ap_id) DO UPDATE SET
+                collection_target=$1,
+                object_type=$3,
+                name=$4,
+                url=$5,
+                attributed_to=$6,
+                content_html=$7,
+                summary_html=$8,
+                image_url=$9,
+                published=$10,
+                updated_at=current_timestamp
+            RETURNING id",
+            &[
+                &collection_target,
+                &item.ap_id,
+                &item.object_type,
+                &item.name,
+                &item.url,
+                &item.attributed_to,
+                &item.content_html,
+                &item.summary_html,
+                &item.image_url,
+                &item.published,
+            ],
+        )
+        .await?;
+
+    Ok(Some(CollectionTargetItemLocalID(row.get(0))))
+}
+
+fn collection_target_activity_object_value(
+    value: &serde_json::Value,
+) -> Option<&serde_json::Value> {
+    let activity_type = value.get("type").and_then(serde_json::Value::as_str)?;
+
+    if !matches!(activity_type, "Add" | "Announce" | "Create" | "Update") {
+        return None;
+    }
+
+    match value.get("object")? {
+        object @ serde_json::Value::Object(_) => Some(object),
+        _ => None,
+    }
+}
+
+fn collection_target_activity_object_url(value: &serde_json::Value) -> Option<url::Url> {
+    let activity_type = value.get("type").and_then(serde_json::Value::as_str)?;
+
+    if !matches!(activity_type, "Add" | "Announce" | "Create" | "Update") {
+        return None;
+    }
+
+    value.get("object").and_then(value_link_href_url)
+}
+
+async fn collection_target_preview_item_from_collection_item(
+    value: serde_json::Value,
+    seen_urls: &mut HashSet<url::Url>,
+    ctx: &Arc<crate::BaseContext>,
+) -> Option<CollectionTargetPreviewItem> {
+    /*
+        Actor outboxes usually list activities, while library-style
+        collections often list the objects directly. Prefer the object when it
+        is embedded, and dereference a small number of object URLs when the
+        outbox only carries IDs. This keeps profile, blog, and stream sources
+        useful without turning preview fetches into full ingest jobs.
+    */
+    if let Some(object) = collection_target_activity_object_value(&value) {
+        if let Some(preview) = collection_target_preview_item(object) {
+            return Some(preview);
+        }
+    }
+
+    if let Some(object_url) = collection_target_activity_object_url(&value) {
+        if seen_urls.insert(object_url.clone()) {
+            match crate::apub_util::fetch_ap_object_raw(&object_url, ctx.as_ref()).await {
+                Ok(object) => {
+                    if let Some(preview) = collection_target_preview_item(&object) {
+                        return Some(preview);
+                    }
+                }
+                Err(err) => {
+                    log::debug!("source preview object fetch failed for {object_url}: {err:?}");
+                }
+            }
+        }
+    }
+
+    collection_target_preview_item(&value)
 }
 
 #[async_trait]
@@ -1974,16 +2331,36 @@ impl TaskDef for FetchCollectionTargetPreview {
         let Some(collection) = fetch_collection_url(first_page, &mut seen_urls, &ctx).await? else {
             return Ok(());
         };
+        let collection_total_items = collection_reported_item_count(&collection);
         let Some(page) = fetch_first_collection_page(collection, &mut seen_urls, &ctx).await?
         else {
+            if let Some(total_items) = collection_total_items {
+                let db = ctx.db_pool.get().await?;
+
+                db.execute(
+                    "UPDATE collection_target SET total_items=$2, updated_at=current_timestamp WHERE id=$1",
+                    &[&self.collection_target, &total_items],
+                )
+                .await?;
+            }
+
             return Ok(());
         };
-        let total_items = collection_reported_item_count(&page);
-        let items = collection_items(&page)
-            .into_iter()
-            .filter_map(|item| collection_target_preview_item(&item))
-            .take(COLLECTION_TARGET_PREVIEW_MAX_ITEMS)
-            .collect::<Vec<_>>();
+        let total_items = collection_reported_item_count(&page).or(collection_total_items);
+        let mut items = Vec::new();
+
+        for item in collection_items(&page) {
+            if let Some(item) =
+                collection_target_preview_item_from_collection_item(item, &mut seen_urls, &ctx)
+                    .await
+            {
+                items.push(item);
+            }
+
+            if items.len() >= COLLECTION_TARGET_PREVIEW_MAX_ITEMS {
+                break;
+            }
+        }
 
         let mut db = ctx.db_pool.get().await?;
         let trans = db.transaction().await?;
@@ -3971,6 +4348,22 @@ struct DiscoveredCommunity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveredCollectionTarget {
+    name: String,
+    target_kind: &'static str,
+    software: &'static str,
+    ap_id: url::Url,
+    owner_ap_id: Option<url::Url>,
+    owner_inbox: Option<url::Url>,
+    owner_shared_inbox: Option<url::Url>,
+    followers: Option<url::Url>,
+    first_page: Option<url::Url>,
+    last_page: Option<url::Url>,
+    summary_html: Option<String>,
+    total_items: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscoveredServerHost {
     host: String,
     software: Option<&'static str>,
@@ -4007,12 +4400,31 @@ const SERVER_COMMUNITY_DISCOVERY_MAX_PEER_HOSTS: usize = 250;
 const SERVER_COMMUNITY_DISCOVERY_MIN_POSTS: i64 = 2;
 const SERVER_COMMUNITY_DISCOVERY_TASK_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(45);
+const SERVER_SOURCE_DISCOVERY_TASK_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(35);
+const SERVER_SOURCE_DISCOVERY_MAX_TARGETS: usize = 100;
+const SERVER_SOURCE_DISCOVERY_FUNKWHALE_CHANNEL_PAGES: usize = 2;
+const SERVER_SOURCE_DISCOVERY_WRITEFREELY_READER_PAGES: usize = 2;
 const DISCOURSE_DISCOVER_FETCH_CONCURRENCY: usize = 4;
 const DISCOURSE_DISCOVER_DIRECTORY_PAGES: usize = 45;
 const DISCOURSE_DISCOVER_TOP_PAGES: usize = 20;
 const DISCOURSE_DISCOVER_MAX_HOSTS: usize = 3000;
 const FEDIDB_DISCOVERY_SOFTWARE: &[(&str, &str, usize)] = &[
     ("wordpress", "wordpress", 2),
+    ("funkwhale", "funkwhale", 3),
+    ("owncast", "owncast", 2),
+    ("castopod", "castopod", 2),
+    ("writefreely", "writefreely", 2),
+    ("postmarks", "postmarks", 1),
+    ("bookwyrm", "bookwyrm", 1),
+    ("pixelfed", "pixelfed", 2),
+    ("gotosocial", "gotosocial", 2),
+    ("misskey", "misskey", 2),
+    ("sharkey", "sharkey", 2),
+    ("iceshrimp", "iceshrimp", 1),
+    ("snac", "snac", 1),
+    ("mitra", "mitra", 1),
+    ("wafrn", "wafrn", 1),
     ("mbin", "mbin-compatible", 3),
     ("nodebb", "nodebb", 2),
     ("piefed", "piefed-compatible", 3),
@@ -4145,6 +4557,25 @@ INSERT INTO community_discovery \
 VALUES ($1, $2, current_timestamp, TRUE, $3) \
 ON CONFLICT (community) DO UPDATE SET \
 host=$2, last_seen=current_timestamp, active=TRUE, remote_post_count=$3";
+const UPSERT_DISCOVERED_COLLECTION_TARGET_SQL: &str = "\
+INSERT INTO collection_target \
+(name, target_kind, software, ap_id, owner_ap_id, owner_inbox, owner_shared_inbox, \
+ followers, first_page, last_page, summary_html, total_items) \
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+ON CONFLICT (ap_id) DO UPDATE SET \
+name=EXCLUDED.name, \
+target_kind=EXCLUDED.target_kind, \
+software=COALESCE(EXCLUDED.software, collection_target.software), \
+owner_ap_id=COALESCE(EXCLUDED.owner_ap_id, collection_target.owner_ap_id), \
+owner_inbox=COALESCE(EXCLUDED.owner_inbox, collection_target.owner_inbox), \
+owner_shared_inbox=COALESCE(EXCLUDED.owner_shared_inbox, collection_target.owner_shared_inbox), \
+followers=COALESCE(EXCLUDED.followers, collection_target.followers), \
+first_page=COALESCE(EXCLUDED.first_page, collection_target.first_page), \
+last_page=COALESCE(EXCLUDED.last_page, collection_target.last_page), \
+summary_html=COALESCE(EXCLUDED.summary_html, collection_target.summary_html), \
+total_items=COALESCE(EXCLUDED.total_items, collection_target.total_items), \
+updated_at=current_timestamp \
+RETURNING id";
 const MARK_COMMUNITY_DISCOVERY_SUCCESS_SQL: &str = "\
 UPDATE community_discovery_server \
 SET software=$2, \
@@ -4541,6 +4972,19 @@ fn json_url_any(value: &serde_json::Value, keys: &[&str]) -> Option<url::Url> {
         .find_map(|value| value_string_url(value).or_else(|| value_id_url(value)))
 }
 
+fn json_boolish_any(value: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .filter_map(|key| value.get(*key))
+        .find_map(|value| {
+            value.as_bool().or_else(|| {
+                value
+                    .as_str()
+                    .map(|value| value.eq_ignore_ascii_case("true") || value == "1")
+                    .or_else(|| value.as_i64().map(|value| value != 0))
+            })
+        })
+}
+
 fn url_with_path_segments(base_url: &url::Url, segments: &[&str]) -> Option<url::Url> {
     let mut url = base_url.clone();
     {
@@ -4559,6 +5003,79 @@ fn url_with_path_segments(base_url: &url::Url, segments: &[&str]) -> Option<url:
 
 fn discovery_base_url(host: &str) -> Option<url::Url> {
     format!("https://{host}").parse().ok()
+}
+
+fn discovered_collection_target_host(target: &DiscoveredCollectionTarget) -> Option<String> {
+    target
+        .ap_id
+        .host_str()
+        .and_then(normalize_discovery_host)
+        .map(|host| normalize_discovered_actor_host(&host))
+}
+
+fn collection_target_first_page_from_value(value: &serde_json::Value) -> Option<url::Url> {
+    json_url_any(value, &["first", "firstPage", "outbox"])
+}
+
+fn collection_target_last_page_from_value(value: &serde_json::Value) -> Option<url::Url> {
+    json_url_any(value, &["last", "lastPage"])
+}
+
+fn actor_shared_inbox_url(actor: &serde_json::Value) -> Option<url::Url> {
+    json_url_any(actor, &["sharedInbox", "shared_inbox"]).or_else(|| {
+        actor
+            .get("endpoints")
+            .and_then(|endpoints| json_url_any(endpoints, &["sharedInbox", "shared_inbox"]))
+    })
+}
+
+fn actor_display_name(actor: &serde_json::Value, fallback: &str) -> String {
+    json_str_any(actor, &["name", "preferredUsername", "username"])
+        .unwrap_or(fallback)
+        .trim()
+        .to_owned()
+}
+
+fn discovered_source_from_actor_value(
+    actor_url: url::Url,
+    actor: &serde_json::Value,
+    fallback_name: &str,
+    software: &'static str,
+) -> Option<DiscoveredCollectionTarget> {
+    let outbox = json_url_any(actor, &["outbox"])?;
+    let inbox = json_url_any(actor, &["inbox"]);
+    let ap_id = json_url_any(actor, &["id"]).unwrap_or(actor_url);
+
+    inbox.as_ref()?;
+
+    Some(DiscoveredCollectionTarget {
+        name: actor_display_name(actor, fallback_name),
+        target_kind: "actor_feed",
+        software,
+        ap_id: ap_id.clone(),
+        owner_ap_id: Some(ap_id),
+        owner_inbox: inbox,
+        owner_shared_inbox: actor_shared_inbox_url(actor),
+        followers: json_url_any(actor, &["followers"]),
+        first_page: Some(outbox),
+        last_page: None,
+        summary_html: json_str_any(actor, &["summary"]).map(str::to_owned),
+        total_items: json_i64_any(actor, &["totalItems", "postsCount", "statusesCount"]),
+    })
+}
+
+fn collection_target_visible_item_count(value: &serde_json::Value) -> Option<i64> {
+    json_i64_any(
+        value,
+        &[
+            "totalItems",
+            "uploads_count",
+            "tracks_count",
+            "recordings_count",
+            "episodes_count",
+            "posts_count",
+        ],
+    )
 }
 
 fn nodebb_category_actor_url(host: &str, cid: i64) -> Option<url::Url> {
@@ -6270,6 +6787,762 @@ async fn fetch_gancio_actor_communities(
     Ok(communities)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunkwhaleLibraryDiscoveryCandidate {
+    name: String,
+    ap_id: url::Url,
+    owner_ap_id: Option<url::Url>,
+    summary_html: Option<String>,
+    total_items: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CastopodPodcastDiscoveryCandidate {
+    handle: String,
+    name: String,
+}
+
+fn result_items_from_json(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    if let Some(items) = value.as_array() {
+        return items.iter().collect();
+    }
+
+    for key in ["results", "data", "items", "podcasts"] {
+        if let Some(items) = value.get(key).and_then(serde_json::Value::as_array) {
+            return items.iter().collect();
+        }
+    }
+
+    Vec::new()
+}
+
+fn parse_funkwhale_library_candidates_from_api(
+    value: &serde_json::Value,
+) -> Vec<FunkwhaleLibraryDiscoveryCandidate> {
+    let mut libraries = Vec::new();
+
+    for item in result_items_from_json(value) {
+        if libraries.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+            break;
+        }
+
+        if json_str_any(item, &["privacy_level", "privacyLevel", "visibility"])
+            .is_some_and(|privacy| privacy != "everyone" && privacy != "public")
+        {
+            continue;
+        }
+
+        let total_items = collection_target_visible_item_count(item);
+        if total_items.is_some_and(|count| count < SERVER_COMMUNITY_DISCOVERY_MIN_POSTS) {
+            continue;
+        }
+
+        let Some(ap_id) = json_url_any(item, &["fid", "ap_id", "apId", "id"]) else {
+            continue;
+        };
+
+        let owner_ap_id = item
+            .get("actor")
+            .and_then(|actor| json_url_any(actor, &["fid", "ap_id", "apId", "id", "url"]))
+            .or_else(|| json_url_any(item, &["actor", "owner", "attributedTo"]));
+        let name = json_str_any(item, &["name", "title"])
+            .unwrap_or("Funkwhale library")
+            .trim()
+            .to_owned();
+
+        libraries.push(FunkwhaleLibraryDiscoveryCandidate {
+            name,
+            ap_id,
+            owner_ap_id,
+            summary_html: json_str_any(item, &["description", "summary", "description_html"])
+                .map(str::to_owned),
+            total_items,
+        });
+    }
+
+    libraries
+}
+
+fn parse_funkwhale_channel_sources_from_collection(
+    value: &serde_json::Value,
+) -> Vec<DiscoveredCollectionTarget> {
+    let mut targets = Vec::new();
+
+    for item in collection_items(value) {
+        if targets.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+            break;
+        }
+
+        let Some(actor_url) = json_url_any(&item, &["id", "url"]) else {
+            continue;
+        };
+
+        let fallback_name = discovered_name_from_actor_url(&actor_url)
+            .unwrap_or_else(|| "Funkwhale channel".to_owned());
+        let Some(target) =
+            discovered_source_from_actor_value(actor_url, &item, &fallback_name, "funkwhale")
+        else {
+            continue;
+        };
+
+        targets.push(target);
+    }
+
+    targets
+}
+
+async fn fetch_actor_source_collection_target(
+    actor_url: url::Url,
+    fallback_name: &str,
+    software: &'static str,
+    ctx: &Arc<crate::BaseContext>,
+) -> Result<Option<DiscoveredCollectionTarget>, crate::Error> {
+    let actor = crate::apub_util::fetch_ap_object_raw(&actor_url, ctx.as_ref()).await?;
+
+    Ok(discovered_source_from_actor_value(
+        actor_url,
+        &actor,
+        fallback_name,
+        software,
+    ))
+}
+
+fn push_unique_collection_target(
+    targets: &mut Vec<DiscoveredCollectionTarget>,
+    seen: &mut HashSet<String>,
+    target: DiscoveredCollectionTarget,
+) {
+    if targets.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+        return;
+    }
+
+    if seen.insert(target.ap_id.as_str().to_owned()) {
+        targets.push(target);
+    }
+}
+
+async fn fetch_nodeinfo_source_targets(
+    discovery: Option<&NodeInfoDiscovery>,
+    host: &str,
+    software: &'static str,
+    ctx: &Arc<crate::BaseContext>,
+) -> Vec<DiscoveredCollectionTarget> {
+    let Some(discovery) = discovery else {
+        return Vec::new();
+    };
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+
+    /*
+        Several source-style servers expose one ActivityPub actor from
+        .well-known/nodeinfo instead of offering a directory. WordPress commonly
+        exposes the site Application actor this way.
+    */
+    for actor_url in &discovery.actor_urls {
+        if targets.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+            break;
+        }
+
+        let fallback_name = discovered_name_from_actor_url(actor_url)
+            .unwrap_or_else(|| host.trim_start_matches("www.").to_owned());
+
+        match fetch_actor_source_collection_target(actor_url.clone(), &fallback_name, software, ctx)
+            .await
+        {
+            Ok(Some(target)) => push_unique_collection_target(&mut targets, &mut seen, target),
+            Ok(None) => {}
+            Err(err) => {
+                log::debug!(
+                    "Skipping NodeInfo source actor at {actor_url} because actor fetch failed: {err:?}"
+                );
+            }
+        }
+    }
+
+    targets
+}
+
+fn parse_writefreely_reader_actor_urls_from_html(html: &str, host: &str) -> Vec<url::Url> {
+    let mut seen = HashSet::new();
+    let mut urls = Vec::new();
+    let escaped_host = regex::escape(host);
+    let absolute_pattern = format!(
+        r#"(?i)href=["']https://{}/([A-Za-z0-9][A-Za-z0-9_.-]{{0,80}})/["']"#,
+        escaped_host
+    );
+    let Ok(absolute_regex) = regex::Regex::new(&absolute_pattern) else {
+        return urls;
+    };
+    let Ok(relative_regex) =
+        regex::Regex::new(r#"(?i)href=["']/([A-Za-z0-9][A-Za-z0-9_.-]{0,80})/["']"#)
+    else {
+        return urls;
+    };
+
+    for regex in [&absolute_regex, &relative_regex] {
+        for capture in regex.captures_iter(html) {
+            if urls.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+                break;
+            }
+
+            let Some(slug) = capture.get(1).map(|slug| slug.as_str()) else {
+                continue;
+            };
+            let slug_lower = slug.to_ascii_lowercase();
+
+            if matches!(
+                slug_lower.as_str(),
+                "about" | "css" | "js" | "login" | "me" | "privacy" | "read" | "signup"
+            ) {
+                continue;
+            }
+
+            let Ok(url) = format!("https://{host}/{slug}/").parse::<url::Url>() else {
+                continue;
+            };
+
+            if seen.insert(url.as_str().to_owned()) {
+                urls.push(url);
+            }
+        }
+    }
+
+    urls
+}
+
+fn writefreely_reader_page_url(host: &str, page: usize) -> Result<url::Url, crate::Error> {
+    let Some(base_url) = discovery_base_url(host) else {
+        return Err(crate::Error::InternalStrStatic("Invalid WriteFreely host"));
+    };
+
+    if page <= 1 {
+        return url_with_path_segments(&base_url, &["read"]).ok_or(
+            crate::Error::InternalStrStatic("Invalid WriteFreely reader URL"),
+        );
+    }
+
+    let page = page.to_string();
+    url_with_path_segments(&base_url, &["read", "p", &page]).ok_or(crate::Error::InternalStrStatic(
+        "Invalid WriteFreely reader URL",
+    ))
+}
+
+async fn fetch_writefreely_source_targets(
+    host: &str,
+    ctx: &Arc<crate::BaseContext>,
+) -> Result<Vec<DiscoveredCollectionTarget>, crate::Error> {
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+    let mut errors = Vec::new();
+
+    for page in 1..=SERVER_SOURCE_DISCOVERY_WRITEFREELY_READER_PAGES {
+        let url = writefreely_reader_page_url(host, page)?;
+        let html = match fetch_text(url.clone(), "text/html", ctx).await {
+            Ok(html) => html,
+            Err(err) => {
+                if page == 1 {
+                    errors.push(format!("writefreely reader failed at {url}: {err:?}"));
+                }
+                break;
+            }
+        };
+
+        for actor_url in parse_writefreely_reader_actor_urls_from_html(&html, host) {
+            if targets.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+                break;
+            }
+
+            let fallback_name = discovered_name_from_actor_url(&actor_url)
+                .unwrap_or_else(|| host.trim_start_matches("www.").to_owned());
+
+            match fetch_actor_source_collection_target(
+                actor_url.clone(),
+                &fallback_name,
+                "writefreely",
+                ctx,
+            )
+            .await
+            {
+                Ok(Some(target)) => push_unique_collection_target(&mut targets, &mut seen, target),
+                Ok(None) => {}
+                Err(err) => {
+                    log::debug!(
+                        "Skipping WriteFreely source candidate {actor_url} because actor validation failed: {err:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    if targets.is_empty() && !errors.is_empty() {
+        return Err(crate::Error::InternalStr(discovery_error_reason(errors)));
+    }
+
+    Ok(targets)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WordpressUserDiscoveryCandidate {
+    slug: String,
+    name: String,
+    link: Option<url::Url>,
+}
+
+fn parse_wordpress_user_candidates_from_json(
+    value: &serde_json::Value,
+) -> Vec<WordpressUserDiscoveryCandidate> {
+    let mut users = Vec::new();
+
+    for item in result_items_from_json(value) {
+        if users.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+            break;
+        }
+
+        let Some(slug) = json_str_any(item, &["slug", "username", "name"]) else {
+            continue;
+        };
+        let slug = slug.trim().trim_start_matches('@');
+
+        if slug.is_empty() || slug.contains('@') || slug.chars().any(char::is_whitespace) {
+            continue;
+        }
+
+        users.push(WordpressUserDiscoveryCandidate {
+            slug: slug.to_owned(),
+            name: json_str_any(item, &["name", "display_name"])
+                .unwrap_or(slug)
+                .trim()
+                .to_owned(),
+            link: json_url_any(item, &["link", "url"]),
+        });
+    }
+
+    users
+}
+
+fn wordpress_users_api_url(host: &str) -> Result<url::Url, crate::Error> {
+    let mut url = format!("https://{host}/wp-json/wp/v2/users").parse::<url::Url>()?;
+
+    url.query_pairs_mut()
+        .append_pair("per_page", "100")
+        .append_pair("page", "1");
+
+    Ok(url)
+}
+
+async fn fetch_wordpress_source_targets(
+    host: &str,
+    nodeinfo_discovery: Option<&NodeInfoDiscovery>,
+    ctx: &Arc<crate::BaseContext>,
+) -> Result<Vec<DiscoveredCollectionTarget>, crate::Error> {
+    let mut targets =
+        fetch_nodeinfo_source_targets(nodeinfo_discovery, host, "wordpress", ctx).await;
+    let mut seen = targets
+        .iter()
+        .map(|target| target.ap_id.as_str().to_owned())
+        .collect::<HashSet<_>>();
+    let mut errors = Vec::new();
+    let url = wordpress_users_api_url(host)?;
+
+    match fetch_json_value(url.clone(), ctx).await {
+        Ok(value) => {
+            for candidate in parse_wordpress_user_candidates_from_json(&value) {
+                if targets.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+                    break;
+                }
+
+                let actor_url = match crate::apub_util::fetch_url_from_webfinger(
+                    &candidate.slug,
+                    host,
+                    ctx,
+                )
+                .await
+                {
+                    Ok(Some(actor_url)) => Some(actor_url),
+                    Ok(None) => candidate.link,
+                    Err(err) => {
+                        log::debug!(
+                            "Skipping WordPress WebFinger candidate {}@{} because lookup failed: {err:?}",
+                            candidate.slug,
+                            host
+                        );
+                        candidate.link
+                    }
+                };
+                let Some(actor_url) = actor_url else {
+                    continue;
+                };
+
+                match fetch_actor_source_collection_target(
+                    actor_url.clone(),
+                    &candidate.name,
+                    "wordpress",
+                    ctx,
+                )
+                .await
+                {
+                    Ok(Some(target)) => {
+                        push_unique_collection_target(&mut targets, &mut seen, target);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        log::debug!(
+                            "Skipping WordPress source candidate {actor_url} because actor validation failed: {err:?}"
+                        );
+                    }
+                }
+            }
+        }
+        Err(err) => errors.push(format!("wordpress users API failed at {url}: {err:?}")),
+    }
+
+    if targets.is_empty() && !errors.is_empty() {
+        return Err(crate::Error::InternalStr(discovery_error_reason(errors)));
+    }
+
+    Ok(targets)
+}
+
+fn mastodon_contact_actor_url(value: &serde_json::Value) -> Option<url::Url> {
+    value
+        .get("contact_account")
+        .and_then(|account| json_url_any(account, &["url", "uri"]))
+}
+
+fn mastodon_contact_actor_name<'a>(value: &'a serde_json::Value, fallback: &'a str) -> &'a str {
+    value
+        .get("contact_account")
+        .and_then(|account| json_str_any(account, &["display_name", "username", "acct"]))
+        .unwrap_or(fallback)
+}
+
+async fn fetch_mastodon_compatible_contact_source_targets(
+    host: &str,
+    software: &'static str,
+    ctx: &Arc<crate::BaseContext>,
+) -> Result<Vec<DiscoveredCollectionTarget>, crate::Error> {
+    let url = format!("https://{host}/api/v1/instance").parse::<url::Url>()?;
+    let value = fetch_json_value(url, ctx).await?;
+    let Some(actor_url) = mastodon_contact_actor_url(&value) else {
+        return Ok(Vec::new());
+    };
+    let fallback_name = mastodon_contact_actor_name(&value, host.trim_start_matches("www."));
+    let target =
+        fetch_actor_source_collection_target(actor_url, fallback_name, software, ctx).await?;
+
+    Ok(target.into_iter().collect())
+}
+
+async fn fetch_funkwhale_library_discovery_target(
+    candidate: FunkwhaleLibraryDiscoveryCandidate,
+    ctx: &Arc<crate::BaseContext>,
+) -> Result<Option<DiscoveredCollectionTarget>, crate::Error> {
+    let library = crate::apub_util::fetch_ap_object_raw(&candidate.ap_id, ctx.as_ref()).await?;
+    let total_items = collection_target_visible_item_count(&library).or(candidate.total_items);
+
+    if total_items.is_some_and(|count| count < SERVER_COMMUNITY_DISCOVERY_MIN_POSTS) {
+        return Ok(None);
+    }
+
+    let owner_ap_id = json_url_any(&library, &["attributedTo", "owner"])
+        .or(candidate.owner_ap_id)
+        .or_else(|| json_url_any(&library, &["actor"]));
+    let owner_actor = match owner_ap_id.as_ref() {
+        Some(owner_ap_id) => {
+            Some(crate::apub_util::fetch_ap_object_raw(owner_ap_id, ctx.as_ref()).await?)
+        }
+        None => None,
+    };
+    let owner_name = owner_actor
+        .as_ref()
+        .map(|owner| actor_display_name(owner, "owner"))
+        .filter(|name| name != "owner");
+    let name = owner_name
+        .map(|owner_name| format!("{owner_name} / {}", candidate.name))
+        .unwrap_or(candidate.name);
+
+    Ok(Some(DiscoveredCollectionTarget {
+        name,
+        target_kind: "funkwhale_library",
+        software: "funkwhale",
+        ap_id: candidate.ap_id,
+        owner_ap_id,
+        owner_inbox: owner_actor
+            .as_ref()
+            .and_then(|owner| json_url_any(owner, &["inbox"])),
+        owner_shared_inbox: owner_actor.as_ref().and_then(actor_shared_inbox_url),
+        followers: json_url_any(&library, &["followers"]),
+        first_page: collection_target_first_page_from_value(&library),
+        last_page: collection_target_last_page_from_value(&library),
+        summary_html: json_str_any(&library, &["summary", "description"])
+            .map(str::to_owned)
+            .or(candidate.summary_html),
+        total_items,
+    }))
+}
+
+fn funkwhale_libraries_url(host: &str, api_version: &str) -> Result<url::Url, crate::Error> {
+    let mut url = format!("https://{host}/api/{api_version}/libraries").parse::<url::Url>()?;
+
+    url.query_pairs_mut()
+        .append_pair("scope", "all")
+        .append_pair("page", "1")
+        .append_pair("page_size", "100");
+
+    Ok(url)
+}
+
+fn funkwhale_channel_index_url(host: &str, page: usize) -> Result<url::Url, crate::Error> {
+    let mut url = format!("https://{host}/federation/index/channels").parse::<url::Url>()?;
+
+    url.query_pairs_mut().append_pair("page", &page.to_string());
+
+    Ok(url)
+}
+
+async fn fetch_funkwhale_source_targets(
+    host: &str,
+    ctx: &Arc<crate::BaseContext>,
+) -> Result<Vec<DiscoveredCollectionTarget>, crate::Error> {
+    let mut targets = Vec::new();
+    let mut errors = Vec::new();
+
+    for api_version in ["v2", "v1"] {
+        let url = funkwhale_libraries_url(host, api_version)?;
+
+        match fetch_json_value(url.clone(), ctx).await {
+            Ok(value) => {
+                for candidate in parse_funkwhale_library_candidates_from_api(&value) {
+                    if targets.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+                        break;
+                    }
+
+                    match fetch_funkwhale_library_discovery_target(candidate, ctx).await {
+                        Ok(Some(target)) => targets.push(target),
+                        Ok(None) => {}
+                        Err(err) => {
+                            log::debug!(
+                                "Skipping Funkwhale library from {host} because ActivityPub validation failed: {err:?}"
+                            );
+                        }
+                    }
+                }
+
+                break;
+            }
+            Err(err) => errors.push(format!("funkwhale {api_version} libraries failed: {err:?}")),
+        }
+    }
+
+    for page in 1..=SERVER_SOURCE_DISCOVERY_FUNKWHALE_CHANNEL_PAGES {
+        let url = funkwhale_channel_index_url(host, page)?;
+
+        match fetch_json_value(url.clone(), ctx).await {
+            Ok(value) => {
+                for target in parse_funkwhale_channel_sources_from_collection(&value) {
+                    if targets.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+                        break;
+                    }
+
+                    targets.push(target);
+                }
+            }
+            Err(err) if page == 1 => {
+                errors.push(format!("funkwhale channel index failed: {err:?}"));
+            }
+            Err(_) => break,
+        }
+    }
+
+    if targets.is_empty() && !errors.is_empty() {
+        return Err(crate::Error::InternalStr(discovery_error_reason(errors)));
+    }
+
+    Ok(targets)
+}
+
+fn parse_owncast_directory_hosts_from_m3u(text: &str) -> Vec<DiscoveredServerHost> {
+    let mut seen = HashSet::new();
+    let mut hosts = Vec::new();
+
+    for token in text.split_whitespace() {
+        if hosts.len() >= SERVER_COMMUNITY_DISCOVERY_MAX_PEER_HOSTS {
+            break;
+        }
+
+        let token = token.trim_matches(|ch| ch == '"' || ch == '\'' || ch == ',');
+        let Ok(url) = token.parse::<url::Url>() else {
+            continue;
+        };
+
+        let Some(host) = url.host_str().and_then(normalize_discovery_host) else {
+            continue;
+        };
+
+        if seen.insert(host.clone()) {
+            hosts.push(DiscoveredServerHost {
+                host,
+                software: Some("owncast"),
+            });
+        }
+    }
+
+    hosts
+}
+
+async fn fetch_owncast_directory_hosts(
+    ctx: &Arc<crate::BaseContext>,
+) -> Result<Vec<DiscoveredServerHost>, crate::Error> {
+    let url = "https://directory.owncast.online/api/iptv".parse::<url::Url>()?;
+    let text = fetch_text(url, "application/x-mpegurl, text/plain, */*", ctx).await?;
+
+    Ok(parse_owncast_directory_hosts_from_m3u(&text))
+}
+
+fn owncast_nodeinfo_username(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("metadata")
+        .and_then(|metadata| metadata.get("federation"))
+        .and_then(|federation| json_str_any(federation, &["username", "account"]))
+        .and_then(|value| value.split('@').next())
+        .filter(|value| !value.trim().is_empty())
+}
+
+async fn fetch_owncast_source_targets(
+    host: &str,
+    ctx: &Arc<crate::BaseContext>,
+) -> Result<Vec<DiscoveredCollectionTarget>, crate::Error> {
+    let mut errors = Vec::new();
+    let mut username = None;
+
+    for path in [".well-known/x-nodeinfo2", "nodeinfo/2.0"] {
+        let url = format!("https://{host}/{path}").parse::<url::Url>()?;
+
+        match fetch_json_value(url.clone(), ctx).await {
+            Ok(value) => {
+                username = owncast_nodeinfo_username(&value).map(str::to_owned);
+
+                if username.is_some() {
+                    break;
+                }
+            }
+            Err(err) => errors.push(format!("owncast nodeinfo failed at {url}: {err:?}")),
+        }
+    }
+
+    let Some(username) = username else {
+        return Err(crate::Error::InternalStr(discovery_error_reason(errors)));
+    };
+    let Some(actor_url) = crate::apub_util::fetch_url_from_webfinger(&username, host, ctx).await?
+    else {
+        return Ok(Vec::new());
+    };
+    let target = fetch_actor_source_collection_target(actor_url, &username, "owncast", ctx).await?;
+
+    Ok(target.into_iter().collect())
+}
+
+fn parse_castopod_podcast_candidates_from_json(
+    value: &serde_json::Value,
+) -> Vec<CastopodPodcastDiscoveryCandidate> {
+    let mut podcasts = Vec::new();
+
+    for item in result_items_from_json(value) {
+        if podcasts.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+            break;
+        }
+
+        if json_boolish_any(item, &["is_blocked", "blocked"]) == Some(true) {
+            continue;
+        }
+
+        let Some(handle) = json_str_any(item, &["handle", "username", "slug"]) else {
+            continue;
+        };
+        let handle = handle.trim().trim_start_matches('@');
+
+        if handle.is_empty() || handle.contains('@') || handle.chars().any(char::is_whitespace) {
+            continue;
+        }
+
+        let name = json_str_any(item, &["title", "name"])
+            .unwrap_or(handle)
+            .trim()
+            .to_owned();
+
+        podcasts.push(CastopodPodcastDiscoveryCandidate {
+            handle: handle.to_owned(),
+            name,
+        });
+    }
+
+    podcasts
+}
+
+fn castopod_podcast_api_url(host: &str, path: &str) -> Result<url::Url, crate::Error> {
+    Ok(format!("https://{host}{path}").parse::<url::Url>()?)
+}
+
+async fn fetch_castopod_source_targets(
+    host: &str,
+    ctx: &Arc<crate::BaseContext>,
+) -> Result<Vec<DiscoveredCollectionTarget>, crate::Error> {
+    let mut targets = Vec::new();
+    let mut errors = Vec::new();
+
+    /*
+        Castopod can expose a public podcast list, but many installs disable
+        the REST API. Treat the API as a hint source and verify each podcast
+        through WebFinger before storing an actor feed.
+    */
+    for path in ["/api/v1/podcasts", "/api/podcasts", "/podcasts"] {
+        let url = castopod_podcast_api_url(host, path)?;
+
+        match fetch_json_value(url.clone(), ctx).await {
+            Ok(value) => {
+                for candidate in parse_castopod_podcast_candidates_from_json(&value) {
+                    if targets.len() >= SERVER_SOURCE_DISCOVERY_MAX_TARGETS {
+                        break;
+                    }
+
+                    let Some(actor_url) =
+                        crate::apub_util::fetch_url_from_webfinger(&candidate.handle, host, ctx)
+                            .await?
+                    else {
+                        continue;
+                    };
+
+                    match fetch_actor_source_collection_target(
+                        actor_url,
+                        &candidate.name,
+                        "castopod",
+                        ctx,
+                    )
+                    .await
+                    {
+                        Ok(Some(target)) => targets.push(target),
+                        Ok(None) => {}
+                        Err(err) => log::debug!(
+                            "Skipping Castopod podcast {}@{} because actor validation failed: {err:?}",
+                            candidate.handle,
+                            host
+                        ),
+                    }
+                }
+
+                break;
+            }
+            Err(err) => errors.push(format!("castopod podcast API failed at {url}: {err:?}")),
+        }
+    }
+
+    if targets.is_empty() && !errors.is_empty() {
+        return Err(crate::Error::InternalStr(discovery_error_reason(errors)));
+    }
+
+    Ok(targets)
+}
+
 fn normalize_discovery_host_or_url(value: &str) -> Option<String> {
     let value = value.trim();
 
@@ -6299,6 +7572,19 @@ fn canonical_discovery_software(value: &str) -> Option<&'static str> {
         "streams" | "forte" => Some("streams_forte"),
         "bonfire" => Some("bonfire"),
         "funkwhale" => Some("funkwhale"),
+        "owncast" => Some("owncast"),
+        "castopod" => Some("castopod"),
+        "writefreely" | "write.as" => Some("writefreely"),
+        "postmarks" => Some("postmarks"),
+        "bookwyrm" => Some("bookwyrm"),
+        "pixelfed" => Some("pixelfed"),
+        "gotosocial" | "go-to-social" | "go to social" => Some("gotosocial"),
+        "misskey" | "foundkey" | "firefish" | "calckey" => Some("misskey"),
+        "sharkey" => Some("sharkey"),
+        "iceshrimp" => Some("iceshrimp"),
+        "snac" => Some("snac"),
+        "mitra" => Some("mitra"),
+        "wafrn" => Some("wafrn"),
         "gancio" => Some("gancio"),
         "fedigroups" | "fedigroups-directory" => Some("fedigroups-directory"),
         _ => None,
@@ -6479,6 +7765,19 @@ async fn fetch_fedidb_discovery_hosts(
         }
         Err(err) => {
             log::debug!("Skipping Friendica directory host seeds because fetch failed: {err:?}");
+        }
+    }
+
+    match fetch_owncast_directory_hosts(ctx).await {
+        Ok(owncast_hosts) => {
+            for host in owncast_hosts {
+                if seen.insert(host.host.clone()) {
+                    hosts.push(host);
+                }
+            }
+        }
+        Err(err) => {
+            log::debug!("Skipping Owncast directory host seeds because fetch failed: {err:?}");
         }
     }
 
@@ -6690,6 +7989,120 @@ async fn try_mbin_directory_discovery(
     }
 
     None
+}
+
+async fn fetch_server_sources_for_discovery(
+    host: &str,
+    known_software: Option<&'static str>,
+    nodeinfo_discovery: Option<&NodeInfoDiscovery>,
+    ctx: &Arc<crate::BaseContext>,
+) -> Result<Option<(&'static str, Vec<DiscoveredCollectionTarget>)>, crate::Error> {
+    let static_software = static_discovery_software_for_host(host);
+    let nodeinfo_software = nodeinfo_discovery.and_then(|discovery| discovery.software);
+    let software = known_software.or(nodeinfo_software).or(static_software);
+
+    let targets = match software {
+        Some("wordpress") => fetch_wordpress_source_targets(host, nodeinfo_discovery, ctx).await?,
+        Some("funkwhale") => fetch_funkwhale_source_targets(host, ctx).await?,
+        Some("owncast") => fetch_owncast_source_targets(host, ctx).await?,
+        Some("castopod") => fetch_castopod_source_targets(host, ctx).await?,
+        Some("writefreely") => fetch_writefreely_source_targets(host, ctx).await?,
+        Some(
+            software @ ("postmarks" | "bookwyrm" | "pixelfed" | "gotosocial" | "misskey"
+            | "sharkey" | "iceshrimp" | "snac" | "mitra" | "wafrn"),
+        ) => {
+            let mut targets =
+                fetch_nodeinfo_source_targets(nodeinfo_discovery, host, software, ctx).await;
+            let mut seen = targets
+                .iter()
+                .map(|target| target.ap_id.as_str().to_owned())
+                .collect::<HashSet<_>>();
+
+            match fetch_mastodon_compatible_contact_source_targets(host, software, ctx).await {
+                Ok(contact_targets) => {
+                    for target in contact_targets {
+                        push_unique_collection_target(&mut targets, &mut seen, target);
+                    }
+                }
+                Err(err) => {
+                    log::debug!(
+                        "Skipping Mastodon-compatible contact source for {host} because fetch failed: {err:?}"
+                    );
+                }
+            }
+
+            targets
+        }
+        _ => Vec::new(),
+    };
+
+    if targets.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some((software.unwrap_or("unknown"), targets)))
+}
+
+fn software_uses_collection_target_discovery(software: Option<&'static str>) -> bool {
+    matches!(
+        software,
+        Some(
+            "wordpress"
+                | "funkwhale"
+                | "owncast"
+                | "castopod"
+                | "writefreely"
+                | "postmarks"
+                | "bookwyrm"
+                | "pixelfed"
+                | "gotosocial"
+                | "misskey"
+                | "sharkey"
+                | "iceshrimp"
+                | "snac"
+                | "mitra"
+                | "wafrn"
+        )
+    )
+}
+
+async fn timed_fetch_server_sources_for_discovery(
+    host: &str,
+    known_software: Option<&'static str>,
+    ctx: &Arc<crate::BaseContext>,
+) -> (
+    Option<(&'static str, Vec<DiscoveredCollectionTarget>)>,
+    Option<String>,
+) {
+    let source_discovery_result =
+        match tokio::time::timeout(SERVER_SOURCE_DISCOVERY_TASK_TIMEOUT, async {
+            let nodeinfo_discovery = fetch_nodeinfo_discovery(host, ctx).await.ok();
+
+            fetch_server_sources_for_discovery(
+                host,
+                known_software,
+                nodeinfo_discovery.as_ref(),
+                ctx,
+            )
+            .await
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(crate::Error::InternalStrStatic(
+                "Source discovery timed out",
+            )),
+        };
+
+    match source_discovery_result {
+        Ok(result) => (result, None),
+        Err(err) => (
+            None,
+            Some(truncate_community_follow_rejection_reason(format!(
+                "{err:?}"
+            ))),
+        ),
+    }
 }
 
 async fn fetch_server_communities_for_discovery(
@@ -6959,35 +8372,59 @@ impl TaskDef for DiscoverServerCommunities {
             .software
             .as_deref()
             .and_then(canonical_discovery_software);
-        let discovery_result = match tokio::time::timeout(
-            SERVER_COMMUNITY_DISCOVERY_TASK_TIMEOUT,
-            fetch_server_communities_for_discovery(&host, known_software, &ctx),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(crate::Error::InternalStrStatic(
-                "Community discovery timed out",
-            )),
+        let source_first = software_uses_collection_target_discovery(known_software);
+        let (mut source_discovery, mut source_error) = if source_first {
+            timed_fetch_server_sources_for_discovery(&host, known_software, &ctx).await
+        } else {
+            (None, None)
         };
-
-        let (software, communities) = match discovery_result {
-            Ok(result) => result,
-            Err(err) => {
-                let reason = truncate_community_follow_rejection_reason(format!("{err:?}"));
-                let db = ctx.db_pool.get().await?;
-                let transient = community_discovery_failure_is_transient(&reason);
-
-                db.execute(
-                    MARK_COMMUNITY_DISCOVERY_FAILURE_SQL,
-                    &[&host, &reason, &transient],
-                )
-                .await?;
-
-                log::warn!("Failed to discover communities for {host}: {reason}");
-                return Ok(());
+        let discovery_result = if source_first && source_discovery.is_some() {
+            Err(crate::Error::InternalStrStatic(
+                "Source discovery succeeded without community discovery",
+            ))
+        } else {
+            match tokio::time::timeout(
+                SERVER_COMMUNITY_DISCOVERY_TASK_TIMEOUT,
+                fetch_server_communities_for_discovery(&host, known_software, &ctx),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(crate::Error::InternalStrStatic(
+                    "Community discovery timed out",
+                )),
             }
         };
+
+        if !source_first && discovery_result.is_err() {
+            (source_discovery, source_error) =
+                timed_fetch_server_sources_for_discovery(&host, known_software, &ctx).await;
+        }
+
+        let (software, communities, community_discovery_succeeded) = match discovery_result {
+            Ok((software, communities)) => (software, communities, true),
+            Err(err) => {
+                if let Some((software, _)) = source_discovery.as_ref() {
+                    (*software, Vec::new(), false)
+                } else {
+                    let reason = truncate_community_follow_rejection_reason(format!("{err:?}"));
+                    let db = ctx.db_pool.get().await?;
+                    let transient = community_discovery_failure_is_transient(&reason);
+
+                    db.execute(
+                        MARK_COMMUNITY_DISCOVERY_FAILURE_SQL,
+                        &[&host, &reason, &transient],
+                    )
+                    .await?;
+
+                    log::warn!("Failed to discover communities for {host}: {reason}");
+                    return Ok(());
+                }
+            }
+        };
+        let source_targets = source_discovery
+            .map(|(_, targets)| targets)
+            .unwrap_or_default();
 
         let peer_hosts = if software == "mbin-compatible" {
             match fetch_mbin_federated_hosts(&host, &ctx).await {
@@ -7008,9 +8445,11 @@ impl TaskDef for DiscoverServerCommunities {
         transaction
             .execute(UPSERT_DISCOVERY_SERVER_SQL, &[&host])
             .await?;
-        transaction
-            .execute(RESET_DISCOVERED_COMMUNITIES_FOR_HOST_SQL, &[&host])
-            .await?;
+        if community_discovery_succeeded {
+            transaction
+                .execute(RESET_DISCOVERED_COMMUNITIES_FOR_HOST_SQL, &[&host])
+                .await?;
+        }
 
         for peer_host in peer_hosts {
             let software = peer_host.software;
@@ -7063,10 +8502,68 @@ impl TaskDef for DiscoverServerCommunities {
                 .await?;
         }
 
+        let mut preview_fetches = Vec::new();
+        for target in source_targets {
+            let target_host =
+                discovered_collection_target_host(&target).unwrap_or_else(|| host.clone());
+            let owner_ap_id = target.owner_ap_id.as_ref().map(url::Url::as_str);
+            let owner_inbox = target.owner_inbox.as_ref().map(url::Url::as_str);
+            let owner_shared_inbox = target.owner_shared_inbox.as_ref().map(url::Url::as_str);
+            let followers = target.followers.as_ref().map(url::Url::as_str);
+            let first_page = target.first_page.as_ref().map(url::Url::as_str);
+            let last_page = target.last_page.as_ref().map(url::Url::as_str);
+
+            transaction
+                .execute(
+                    MARK_DISCOVERED_ACTOR_HOST_VALID_SQL,
+                    &[&target_host, &target.software],
+                )
+                .await?;
+
+            let collection_target_id = CollectionTargetLocalID(
+                transaction
+                    .query_one(
+                        UPSERT_DISCOVERED_COLLECTION_TARGET_SQL,
+                        &[
+                            &target.name,
+                            &target.target_kind,
+                            &target.software,
+                            &target.ap_id.as_str(),
+                            &owner_ap_id,
+                            &owner_inbox,
+                            &owner_shared_inbox,
+                            &followers,
+                            &first_page,
+                            &last_page,
+                            &target.summary_html,
+                            &target.total_items,
+                        ],
+                    )
+                    .await?
+                    .get(0),
+            );
+
+            if let Some(first_page) = target.first_page {
+                preview_fetches.push((collection_target_id, first_page));
+            }
+        }
+
         transaction
             .execute(MARK_COMMUNITY_DISCOVERY_SUCCESS_SQL, &[&host, &software])
             .await?;
         transaction.commit().await?;
+
+        for (collection_target_id, first_page) in preview_fetches {
+            crate::apub_util::spawn_enqueue_fetch_collection_target_preview(
+                collection_target_id,
+                first_page,
+                ctx.clone(),
+            );
+        }
+
+        if let Some(source_error) = source_error {
+            log::debug!("Source discovery for {host} had no stored targets: {source_error}");
+        }
 
         Ok(())
     }
@@ -9906,6 +11403,14 @@ mod tests {
             "id": "https://lotide.example/apub/comments/77/create",
             "object": "https://lotide.example/apub/comments/77"
         });
+        let source_comment_create = serde_json::json!({
+            "type": "Create",
+            "id": "https://lotide.example/apub/collection_targets/12/items/44/comments/6/create",
+            "object": {
+                "type": "Note",
+                "id": "https://lotide.example/apub/collection_targets/12/items/44/comments/6"
+            }
+        });
 
         match super::delivered_local_create_object(&post_create.to_string(), &host_url_apub) {
             Some(crate::apub_util::LocalObjectRef::Post(id)) => assert_eq!(id.raw(), 42),
@@ -9915,6 +11420,22 @@ mod tests {
         match super::delivered_local_create_object(&comment_create.to_string(), &host_url_apub) {
             Some(crate::apub_util::LocalObjectRef::Comment(id)) => assert_eq!(id.raw(), 77),
             other => panic!("expected local comment create, got {:?}", other),
+        }
+
+        match super::delivered_local_create_object(
+            &source_comment_create.to_string(),
+            &host_url_apub,
+        ) {
+            Some(crate::apub_util::LocalObjectRef::CollectionTargetItemComment(
+                target,
+                item,
+                comment,
+            )) => {
+                assert_eq!(target.raw(), 12);
+                assert_eq!(item.raw(), 44);
+                assert_eq!(comment.raw(), 6);
+            }
+            other => panic!("expected local source item comment create, got {:?}", other),
         }
     }
 
@@ -9972,6 +11493,51 @@ mod tests {
             }
             other => panic!("expected local comment like, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn delivered_like_detects_collection_target_item_likes() {
+        let host_url_apub = "https://lotide.example/apub".parse().unwrap();
+        let item_like = serde_json::json!({
+            "type": "Like",
+            "id": "https://lotide.example/apub/collection_targets/15/items/44/likes/7?activity=55069044-5cd2-4d30-9afe-9d0ea7c4e3d7",
+            "actor": "https://lotide.example/apub/users/7",
+            "object": "https://photo.example/objects/one"
+        });
+
+        match super::delivered_local_like_object(&item_like.to_string(), &host_url_apub) {
+            Some(crate::apub_util::LocalObjectRef::CollectionTargetItemLike(
+                target,
+                item,
+                user,
+            )) => {
+                assert_eq!(target, crate::types::CollectionTargetLocalID(15));
+                assert_eq!(item, crate::types::CollectionTargetItemLocalID(44));
+                assert_eq!(user, crate::UserLocalID(7));
+            }
+            other => panic!("expected local source item like, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn delivered_like_undo_detects_collection_target_item_like_undos() {
+        let host_url_apub = "https://lotide.example/apub".parse().unwrap();
+        let undo_id = uuid::Uuid::new_v4();
+        let undo = serde_json::json!({
+            "type": "Undo",
+            "id": format!("https://lotide.example/apub/collection_target_item_like_undos/{undo_id}"),
+            "actor": "https://lotide.example/apub/users/7",
+            "object": {
+                "type": "Like",
+                "id": "https://lotide.example/apub/collection_targets/15/items/44/likes/7",
+                "object": "https://photo.example/objects/one"
+            }
+        });
+
+        assert_eq!(
+            super::delivered_local_like_undo(&undo.to_string(), &host_url_apub),
+            Some(super::DeliveredLikeUndo::CollectionTargetItem(undo_id))
+        );
     }
 
     #[test]
@@ -11371,6 +12937,23 @@ mod tests {
                     *slug == "friendica" && *software == "friendica" && *max_pages >= 8
                 })
         );
+        assert!(
+            super::FEDIDB_DISCOVERY_SOFTWARE
+                .iter()
+                .any(|(slug, software, max_pages)| {
+                    *slug == "funkwhale" && *software == "funkwhale" && *max_pages >= 2
+                })
+        );
+        assert!(
+            super::FEDIDB_DISCOVERY_SOFTWARE
+                .iter()
+                .any(|(slug, software, _)| *slug == "owncast" && *software == "owncast")
+        );
+        assert!(
+            super::FEDIDB_DISCOVERY_SOFTWARE
+                .iter()
+                .any(|(slug, software, _)| *slug == "castopod" && *software == "castopod")
+        );
         assert_eq!(
             super::static_discovery_software_for_host("meta.discourse.org"),
             Some("discourse")
@@ -11449,6 +13032,269 @@ mod tests {
             gancio.as_str(),
             "https://gancio.example/federation/u/gancio"
         );
+    }
+
+    #[test]
+    fn source_discovery_reads_funkwhale_public_libraries() {
+        let response = serde_json::json!({
+            "count": 3,
+            "results": [{
+                "fid": "https://audio.example/federation/music/libraries/lib-public",
+                "name": "public library",
+                "privacy_level": "everyone",
+                "uploads_count": 12,
+                "actor": {
+                    "fid": "https://audio.example/federation/actors/alice"
+                }
+            }, {
+                "fid": "https://audio.example/federation/music/libraries/lib-empty",
+                "name": "empty library",
+                "privacy_level": "everyone",
+                "uploads_count": 0,
+                "actor": {
+                    "fid": "https://audio.example/federation/actors/bob"
+                }
+            }, {
+                "fid": "https://audio.example/federation/music/libraries/lib-restricted",
+                "name": "restricted library",
+                "privacy_level": "instance",
+                "uploads_count": 19,
+                "actor": {
+                    "fid": "https://audio.example/federation/actors/carla"
+                }
+            }]
+        });
+        let libraries = super::parse_funkwhale_library_candidates_from_api(&response);
+
+        assert_eq!(libraries.len(), 1);
+        assert_eq!(libraries[0].name, "public library");
+        assert_eq!(
+            libraries[0].ap_id.as_str(),
+            "https://audio.example/federation/music/libraries/lib-public"
+        );
+        assert_eq!(
+            libraries[0].owner_ap_id.as_ref().map(url::Url::as_str),
+            Some("https://audio.example/federation/actors/alice")
+        );
+        assert_eq!(libraries[0].total_items, Some(12));
+    }
+
+    #[test]
+    fn source_discovery_reads_funkwhale_channels_and_skips_imports() {
+        let response = serde_json::json!({
+            "type": "CollectionPage",
+            "items": [{
+                "type": "Person",
+                "id": "https://audio.example/federation/actors/adala",
+                "preferredUsername": "adala",
+                "name": "Adala",
+                "inbox": "https://audio.example/federation/actors/adala/inbox",
+                "outbox": "https://audio.example/federation/actors/adala/outbox",
+                "followers": "https://audio.example/federation/actors/adala/followers",
+                "endpoints": {
+                    "sharedInbox": "https://audio.example/federation/shared/inbox"
+                }
+            }, {
+                "type": "Application",
+                "id": "https://audio.example/federation/actors/rssfeed",
+                "preferredUsername": "rssfeed",
+                "inbox": null,
+                "outbox": null
+            }]
+        });
+        let channels = super::parse_funkwhale_channel_sources_from_collection(&response);
+
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].name, "Adala");
+        assert_eq!(channels[0].software, "funkwhale");
+        assert_eq!(channels[0].target_kind, "actor_feed");
+        assert_eq!(
+            channels[0].owner_inbox.as_ref().map(url::Url::as_str),
+            Some("https://audio.example/federation/actors/adala/inbox")
+        );
+        assert_eq!(
+            channels[0]
+                .owner_shared_inbox
+                .as_ref()
+                .map(url::Url::as_str),
+            Some("https://audio.example/federation/shared/inbox")
+        );
+    }
+
+    #[test]
+    fn source_discovery_reads_owncast_directory_playlist_hosts() {
+        let playlist = r#"
+            #EXTM3U
+            #EXTINF:-1, tvg-ID="First"
+            https://watch.example/hls/stream.m3u8
+            #EXTINF:-1, tvg-ID="Second"
+            https://stream.example/hls/stream.m3u8
+            https://watch.example/hls/other.m3u8
+        "#;
+        let hosts = super::parse_owncast_directory_hosts_from_m3u(playlist);
+
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].host, "watch.example");
+        assert_eq!(hosts[0].software, Some("owncast"));
+        assert_eq!(hosts[1].host, "stream.example");
+    }
+
+    #[test]
+    fn source_discovery_reads_owncast_nodeinfo_username() {
+        let nodeinfo = serde_json::json!({
+            "metadata": {
+                "federation": {
+                    "enabled": true,
+                    "username": "demo"
+                }
+            }
+        });
+        let account_nodeinfo = serde_json::json!({
+            "metadata": {
+                "federation": {
+                    "account": "stream@watch.example"
+                }
+            }
+        });
+
+        assert_eq!(super::owncast_nodeinfo_username(&nodeinfo), Some("demo"));
+        assert_eq!(
+            super::owncast_nodeinfo_username(&account_nodeinfo),
+            Some("stream")
+        );
+    }
+
+    #[test]
+    fn source_discovery_reads_writefreely_reader_links() {
+        let html = r#"
+            <a href="https://text.example/tech-notes/">Tech Notes</a>
+            <a href="/garden/">Garden</a>
+            <a href="/read/">Reader</a>
+            <a href="/login/">Login</a>
+            <a href="https://other.example/elsewhere/">Elsewhere</a>
+            <a href="https://text.example/tech-notes/">Duplicate</a>
+        "#;
+        let urls = super::parse_writefreely_reader_actor_urls_from_html(html, "text.example");
+
+        assert_eq!(urls.len(), 2);
+        assert_eq!(urls[0].as_str(), "https://text.example/tech-notes/");
+        assert_eq!(urls[1].as_str(), "https://text.example/garden/");
+    }
+
+    #[test]
+    fn source_discovery_reads_wordpress_user_candidates() {
+        let response = serde_json::json!([{
+            "slug": "writer",
+            "name": "Writer",
+            "link": "https://blog.example/author/writer/"
+        }, {
+            "slug": "bad handle",
+            "name": "Bad"
+        }]);
+        let users = super::parse_wordpress_user_candidates_from_json(&response);
+
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].slug, "writer");
+        assert_eq!(users[0].name, "Writer");
+        assert_eq!(
+            users[0].link.as_ref().map(url::Url::as_str),
+            Some("https://blog.example/author/writer/")
+        );
+    }
+
+    #[test]
+    fn source_discovery_keeps_actor_canonical_id() {
+        let actor = serde_json::json!({
+            "type": "Person",
+            "id": "https://text.example/api/collections/news",
+            "preferredUsername": "news",
+            "inbox": "https://text.example/api/collections/news/inbox",
+            "outbox": "https://text.example/api/collections/news/outbox"
+        });
+        let fetch_url = "https://text.example/news/".parse::<url::Url>().unwrap();
+        let source =
+            super::discovered_source_from_actor_value(fetch_url, &actor, "news", "writefreely")
+                .unwrap();
+
+        assert_eq!(
+            source.ap_id.as_str(),
+            "https://text.example/api/collections/news"
+        );
+        assert_eq!(
+            source.owner_ap_id.as_ref().map(url::Url::as_str),
+            Some("https://text.example/api/collections/news")
+        );
+    }
+
+    #[test]
+    fn source_preview_keeps_total_items_from_empty_ordered_collection() {
+        let outbox = serde_json::json!({
+            "type": "OrderedCollection",
+            "totalItems": 3166,
+            "orderedItems": []
+        });
+
+        assert_eq!(super::collection_reported_item_count(&outbox), Some(3166));
+        assert!(super::collection_items(&outbox).is_empty());
+    }
+
+    #[test]
+    fn source_discovery_treats_profile_platforms_as_source_first() {
+        assert!(super::software_uses_collection_target_discovery(Some(
+            "wordpress"
+        )));
+        assert!(super::software_uses_collection_target_discovery(Some(
+            "writefreely"
+        )));
+        assert!(super::software_uses_collection_target_discovery(Some(
+            "pixelfed"
+        )));
+        assert!(super::software_uses_collection_target_discovery(Some(
+            "gotosocial"
+        )));
+        assert!(super::software_uses_collection_target_discovery(Some(
+            "snac"
+        )));
+        assert!(!super::software_uses_collection_target_discovery(Some(
+            "lemmy-compatible"
+        )));
+    }
+
+    #[test]
+    fn source_discovery_normalizes_fedidb_profile_software() {
+        assert_eq!(
+            super::canonical_discovery_software("GoToSocial"),
+            Some("gotosocial")
+        );
+        assert_eq!(
+            super::canonical_discovery_software("Write.as"),
+            Some("writefreely")
+        );
+        assert_eq!(
+            super::canonical_discovery_software("Iceshrimp"),
+            Some("iceshrimp")
+        );
+    }
+
+    #[test]
+    fn source_discovery_reads_castopod_podcast_handles() {
+        let response = serde_json::json!([{
+            "handle": "show",
+            "title": "The Show",
+            "is_blocked": false
+        }, {
+            "handle": "private",
+            "title": "Private",
+            "is_blocked": true
+        }, {
+            "handle": "bad handle",
+            "title": "Bad"
+        }]);
+        let podcasts = super::parse_castopod_podcast_candidates_from_json(&response);
+
+        assert_eq!(podcasts.len(), 1);
+        assert_eq!(podcasts[0].handle, "show");
+        assert_eq!(podcasts[0].name, "The Show");
     }
 
     #[test]
@@ -11737,15 +13583,15 @@ mod tests {
             "lotide.example"
         ));
         assert!(super::federation_policy_domain_matches_local(
-            "*.example",
+            "*.example.net",
             "lotide.example"
         ));
         assert!(!super::federation_policy_domain_matches_local(
-            "example",
+            "example.net",
             "lotide.example"
         ));
         assert!(!super::federation_policy_domain_matches_local(
-            "lemmy.example",
+            "lemmy.example.net",
             "lotide.example"
         ));
     }
@@ -11793,7 +13639,7 @@ mod tests {
         let not_listed = serde_json::json!({
             "federated_instances": {
                 "linked": [
-                    { "domain": "lemmy.example" }
+                    { "domain": "lemmy.example.net" }
                 ],
                 "allowed": [],
                 "blocked": []
@@ -12280,6 +14126,125 @@ mod tests {
             Some("https://audio.example/federation/actors/alice")
         );
         assert!(preview.published.is_some());
+    }
+
+    #[test]
+    fn collection_target_preview_items_derive_names_from_note_content() {
+        let item = serde_json::json!({
+            "type": "Note",
+            "id": "https://book.example/user/alice/status/1",
+            "content": "<p>Which programming language had the best visualisation support?</p>",
+            "published": "2026-06-16T19:51:53.257081+00:00",
+            "url": "https://book.example/user/alice/status/1"
+        });
+        let preview = super::collection_target_preview_item(&item).unwrap();
+
+        assert_eq!(
+            preview.name,
+            "Which programming language had the best visualisation support?"
+        );
+        assert_eq!(preview.object_type.as_deref(), Some("Note"));
+    }
+
+    #[test]
+    fn collection_target_preview_items_derive_names_from_source_content() {
+        let item = serde_json::json!({
+            "type": "Note",
+            "id": "https://postmarks.example/users/benmarks/statuses/1",
+            "source": {
+                "content": "A useful bookmark about ActivityPub groups\n\nSecond line.",
+                "mediaType": "text/markdown"
+            },
+            "published": "2026-06-15T14:47:24.512+00:00"
+        });
+        let preview = super::collection_target_preview_item(&item).unwrap();
+
+        assert_eq!(preview.name, "A useful bookmark about ActivityPub groups");
+    }
+
+    #[test]
+    fn collection_target_preview_items_sanitize_cached_html_and_preserve_images() {
+        let item = serde_json::json!({
+            "type": "Note",
+            "id": "https://source.example/users/alice/statuses/1",
+            "content": "<p onclick=\"bad()\">Clean source preview title</p>",
+            "summary": "<img src=\"https://source.example/track.png\" onerror=\"bad()\"><p>Summary.</p>"
+        });
+        let preview = super::collection_target_preview_item(&item).unwrap();
+
+        assert_eq!(preview.name, "Clean source preview title");
+        assert!(!preview.content_html.unwrap().contains("onclick"));
+        let summary = preview.summary_html.unwrap();
+
+        assert!(summary.contains("<img"));
+        assert!(!summary.contains("onerror"));
+    }
+
+    #[test]
+    fn collection_target_preview_items_decode_entities_in_derived_names() {
+        let item = serde_json::json!({
+            "type": "Note",
+            "id": "https://source.example/users/alice/statuses/2",
+            "content": "<p>Tooltrace &amp;quot;Custom foam cutouts&amp;quot;</p>"
+        });
+        let preview = super::collection_target_preview_item(&item).unwrap();
+
+        assert_eq!(preview.name, "Tooltrace \"Custom foam cutouts\"");
+    }
+
+    #[test]
+    fn collection_target_preview_items_use_host_fallback_for_empty_notes() {
+        let item = serde_json::json!({
+            "type": "Note",
+            "id": "https://detroitriotcity.com/objects/89a948b4"
+        });
+        let preview = super::collection_target_preview_item(&item).unwrap();
+
+        assert_eq!(preview.name, "Note from detroitriotcity.com");
+    }
+
+    #[test]
+    fn collection_target_preview_items_unwrap_embedded_create_objects() {
+        let activity = serde_json::json!({
+            "type": "Create",
+            "id": "https://blog.example/activities/create-1",
+            "actor": "https://blog.example/api/collections/news",
+            "object": {
+                "type": "Article",
+                "id": "https://blog.example/posts/1",
+                "name": "A useful source post",
+                "content": "<p>Body.</p>",
+                "url": "https://blog.example/a-useful-source-post",
+                "published": "2026-06-18T10:00:00Z",
+                "attributedTo": "https://blog.example/api/collections/news"
+            }
+        });
+        let object = super::collection_target_activity_object_value(&activity).unwrap();
+        let preview = super::collection_target_preview_item(object).unwrap();
+
+        assert_eq!(preview.ap_id, "https://blog.example/posts/1");
+        assert_eq!(preview.object_type.as_deref(), Some("Article"));
+        assert_eq!(preview.name, "A useful source post");
+        assert_eq!(
+            preview.url.as_deref(),
+            Some("https://blog.example/a-useful-source-post")
+        );
+    }
+
+    #[test]
+    fn collection_target_preview_items_extract_object_urls_from_create() {
+        let activity = serde_json::json!({
+            "type": "Create",
+            "id": "https://gts.example/users/alice/statuses/1/activity",
+            "actor": "https://gts.example/users/alice",
+            "object": "https://gts.example/users/alice/statuses/1"
+        });
+        let object_url = super::collection_target_activity_object_url(&activity).unwrap();
+
+        assert_eq!(
+            object_url.as_str(),
+            "https://gts.example/users/alice/statuses/1"
+        );
     }
 
     #[test]

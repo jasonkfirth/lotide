@@ -154,6 +154,9 @@ Fallback rules:
 - unknown `Person` actors stay `ProfileOnly`
 - actors without an inbox cannot receive outbound actions, even if the
   fallback family would otherwise support the operation
+- explicit lookup of a known source-feed actor stores a bounded
+  `collection_target` preview, but ordinary remote authors discovered during
+  inbox processing remain user rows
 
 The current profile is persisted in `actor_target_profile` with the source,
 confidence, actor shape, and JSON evidence. Remote community content appends
@@ -180,8 +183,31 @@ Blog or publisher targets in scope:
 
 - WordPress ActivityPub
 - WordPress Event Bridge when a live event actor or fixture is available
-- WriteFreely and Postmarks-style blog actors as future blog-publisher
-  candidates when they expose `Article`, `Page`, or `Note` actor feeds
+- WriteFreely and Postmarks-style blog actors when they expose `Article`,
+  `Page`, or `Note` actor feeds
+
+Source feed targets in scope:
+
+- Owncast stream actors
+- Castopod podcast actors
+- Pixelfed, BookWyrm, GoToSocial, Misskey, Sharkey, Iceshrimp, snac, Mitra,
+  and Wafrn profile feeds when explicitly looked up by URL or handle
+
+Source feed replies are not one universal operation. Blog and profile-feed
+software usually accepts a public `Create{Note}` reply with `inReplyTo` set to
+the original item, while library and stream feeds often represent catalog or
+status objects rather than discussion threads. Lotide enables the reply UI only
+for source families where that public reply shape is known to fit:
+
+- WordPress ActivityPub, WriteFreely, Postmarks, Castopod, Gancio, and
+  Mobilizon-style event publishers
+- BookWyrm, Pixelfed, GoToSocial, Misskey, Sharkey, Iceshrimp, snac, Mitra,
+  and Wafrn profile feeds
+
+Lotide deliberately does not expose source-item replies for Funkwhale library
+objects or Owncast stream actors until a target-specific path proves that a
+reply is useful and accepted. This keeps source feeds readable without
+inventing comment semantics for objects that were not designed as threads.
 
 Profile-only software that should interoperate with Lotide users but should not
 populate the communities list by default:
@@ -218,6 +244,16 @@ Current discovery sources:
   `https://relay.fedi.buzz/instance/{host}` Service actors. These are relay
   endpoints, not discussion communities, so they should be opt-in targets, not
   broad all-communities discovery rows.
+- Source discovery: source-style software can now populate `collection_target`
+  rows directly. Funkwhale uses public library API hints plus
+  `/federation/index/channels`, Owncast uses the project directory as a host
+  seed and resolves the stream actor through NodeInfo/WebFinger, and Castopod
+  uses a public podcast API when an instance exposes it. Each candidate still
+  has to resolve to ActivityPub endpoints before it is stored.
+- Source feeds: explicit lookup can store blog, stream, event, photo, review,
+  and microblog actors as `collection_target` rows. These belong on the
+  sources page, not the all-communities list, unless the actor is also a real
+  forum or group.
 
 Known non-list cases:
 
@@ -225,7 +261,12 @@ Known non-list cases:
   normal group actor. It must be modeled as a followed collection with an owner
   inbox before it should appear as a first-class follow target. Lotide now
   stores those as `collection_target` rows and caches a bounded preview of
-  Audio-like items from the first library page.
+  Audio-like items from the first library page. Discovery skips private or
+  empty libraries and also accepts Funkwhale channel actors from the public
+  federation channel index.
+- Owncast and Castopod are source-feed providers, not communities. Discovery
+  should list them under sources after actor validation, not under the global
+  community tab.
 - Mobilizon public GraphQL event search is available, but group listing requires
   authentication on tested instances. Known groups should be discovered by
   handle or URL until a public group directory is found.

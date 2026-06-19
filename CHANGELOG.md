@@ -2,7 +2,73 @@
 
 All notable local changes to this Lotide fork are recorded here.
 
-## 0.17.1 - 2026-06-11
+## 0.18.0 - 2026-06-18
+
+### Runtime Follow-up - 2026-06-18
+
+- Cleaned source-preview item HTML before returning it through the API,
+  derived readable preview titles from unnamed actor-feed Notes, and added a
+  migration to backfill older cached `[no title]` source rows.
+- Added compact source-list summary excerpts and host-based fallback labels for
+  empty source-preview objects so actor feeds remain readable before opening
+  each source detail page.
+- Added an API endpoint for individual cached source items so frontends can
+  render blog posts, profile posts, media entries, and bookmarks inside Lotide
+  before sending the user to the original site.
+- Preserved sanitized images in newly cached source-item bodies so native
+  source readers can show ordinary article and media-post images.
+- Added private-message conversation dismissal state and a conversation-summary
+  listing mode so frontends can show one mailbox row per participant instead
+  of every individual message row.
+- Fixed outgoing Lemmy-family private message delivery to use the recipient
+  actor inbox, format `ChatMessage` objects as HTML with markdown source, and
+  avoid remote `inReplyTo` threading that Lemmy private-message inboxes reject.
+- Added one-to-one ActivityPub direct message storage, notification linkage,
+  local API endpoints, and outbound signed delivery for private `Note`
+  conversations between users.
+- Added inbound private `Note` handling for direct messages addressed to local
+  users, while keeping non-public non-message activity out of the normal public
+  ingest path.
+- Added inbound private `ChatMessage` handling for Lemmy-family and
+  LitePub-style direct messages, and taught local replies to keep that object
+  shape when answering a `ChatMessage` thread.
+- Added signed ActivityPub GET retry for remote actors and objects that reject
+  unsigned public fetches, improving profile/source support for GoToSocial,
+  Sharkey, Wafrn, and other stricter servers.
+- Added source-preview item Like and Undo delivery for profile-oriented
+  ActivityPub publishers, with platform capability reporting for sources that
+  expose preview items but do not accept Like activities.
+- Marked Postmarks source-preview likes as unsupported instead of retrying
+  activities that the remote software's inbox does not implement.
+- Normalized remote ActivityStreams `mediaType` values that incorrectly carry
+  URL query strings, so otherwise valid actors can still deserialize.
+- Treated unknown `Service` and `Application` actors under user-profile paths
+  as user-like authors, which lets Lemmy bot accounts participate in announced
+  posts without being mistaken for group services.
+- Stopped retrying outbound inbox deliveries after a remote server explicitly
+  reports that the local domain is blocked, while still allowing transient
+  transport failures to use the normal retry budget.
+- Deduplicated source-preview Like and Undo audiences when a source owner and
+  item author are the same actor.
+- Expanded source discovery beyond Funkwhale, Owncast, and Castopod by seeding
+  source-oriented Fediverse platforms, using NodeInfo ActivityPub actors, and
+  adding WordPress and WriteFreely public source expansion.
+- Preserved source preview `totalItems` from ActivityPub collections that report
+  a count but expose no inline first page, which keeps WordPress application
+  actors visible even when their outbox stream is separate.
+- Prioritized source-capable discovery hosts in the worker queue so source
+  catalogs refresh ahead of broad forum sweeps.
+- Classified additional permanent inbox verification failures as terminal,
+  including non-addressed activities and ActivityStreams `Either`
+  deserialization failures, so malformed remote traffic does not burn every
+  retry slot.
+- Fixed collection-target list SQL generation so Funkwhale and other
+  collection-style targets render in the communities view instead of tripping a
+  backend syntax error.
+- Made the unstable database debug endpoint require a site-admin login instead
+  of exposing connection pool status publicly.
+- Raised the live deployment's Lotide database pool size after observing worker
+  traffic briefly exhausting the old pool and delaying simple API requests.
 
 ### Release Follow-up - 2026-06-17
 
@@ -88,7 +154,7 @@ All notable local changes to this Lotide fork are recorded here.
 ### Changed
 
 - Updated the project to Rust 2024 and bumped the local release version to
-  `0.17.1`.
+  `0.18.0`.
 - Modernized the HTTP stack to Hyper 1, `http` 1, `headers` 0.4,
   `hyper-util`, and `http-body-util`.
 - Updated direct HTML parser dependencies to current `html5ever` and
@@ -154,6 +220,12 @@ All notable local changes to this Lotide fork are recorded here.
   status tests.
 - Added task-scheduler, janitor, discovery, and terminal-error classification
   tests.
+- Added source-preview Like/Undo packet-shape tests, signed-fetch signature
+  tests, source platform capability tests, and query-preserving signature path
+  tests.
+- Raised the strict Clippy gate with
+  `clippy::redundant_closure_for_method_calls` on top of the existing
+  high-signal lint set.
 - Reran the live signed, low-impact federation matrix after the HTTP
   modernization. The representative matrix was green for 19 target families.
 

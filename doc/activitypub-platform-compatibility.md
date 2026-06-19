@@ -371,6 +371,11 @@ Implementation note:
   of Audio-like items from the first library page so users can decide whether
   the library is worth following without turning a one-off preview into an
   unbounded music mirror.
+- Discovery has two Funkwhale paths. Public library APIs provide `Library`
+  candidates, but those are only stored after Lotide fetches the Library object
+  and the owner actor used for delivery. The public federation channel index
+  provides channel actor feeds; imported RSS-style entries without inbox and
+  outbox fields are ignored.
 
 ### FediGroups and Relay Groups
 
@@ -412,6 +417,82 @@ Compatibility rules:
 - Dedupe by actor ID, not just `preferredUsername`. Some WordPress blog actors
   can share a handle-like name across language variants while using different
   actor IDs and audiences.
+- Explicit lookup stores WordPress actors as source `collection_target` rows
+  when they expose an inbox and outbox. Inbound authors discovered while
+  processing remote packets remain normal user rows. That keeps blog following
+  usable without granting blog actors community moderation semantics.
+
+### WriteFreely and Postmarks
+
+WriteFreely and Postmarks-style actors are blog or bookmark publishers. They
+are useful as source feeds, not as communities.
+
+Compatibility rules:
+
+- Treat the actor as a source `collection_target` when explicit lookup finds a
+  supported actor with inbox and outbox.
+- Follow the actor with `Follow`.
+- Preview the actor outbox by reading embedded objects or dereferencing
+  `Create.object` URLs when the outbox only lists activity wrappers.
+- Accept `Article`, `Page`, `Note`, and image-like objects as readable source
+  items.
+- Keep outbound posting disabled. Replies and likes are best-effort and must
+  use the original object, not a fake community container.
+
+### Owncast
+
+Owncast presents a single stream actor. It is a source feed for stream posts and
+live notices, not a forum.
+
+Compatibility rules:
+
+- Treat Owncast actors as `collection_target` source feeds.
+- Accept `Service` actors and preserve their inbox, outbox, followers, icon,
+  image, and summary when present.
+- Follow with `Follow` to the stream actor inbox.
+- Preview public outbox objects as notes or video-like items.
+- Treat likes and shares as engagement on the stream actor's objects. Do not
+  require Lemmy-style comments or vote counts.
+- Discovery uses the opt-in Owncast directory only as a host seed. Lotide then
+  reads NodeInfo for the configured federation username, resolves the actor
+  through WebFinger, and stores the actor only if ActivityPub endpoints are
+  present.
+
+### Castopod
+
+Castopod podcast actors are source feeds for episodes and podcast posts. They
+are not moderation-capable discussion groups.
+
+Compatibility rules:
+
+- Treat Castopod podcast actors as `collection_target` source feeds.
+- Follow with `Follow` to the podcast actor inbox.
+- Preview the outbox for episode-like audio objects, articles, notes, and
+  related document objects.
+- Keep replies and likes best-effort against the original object.
+- Do not place Castopod podcasts in the all-communities list as threadiverse
+  communities.
+- Discovery may use the public podcast API when an instance exposes it, but
+  every handle must still resolve through WebFinger before Lotide stores it.
+
+### Profile Feed Sources
+
+Pixelfed, BookWyrm, GoToSocial, Misskey-family servers, snac, Mitra, and Wafrn
+primarily expose people and their public outboxes. They are not group
+providers, but a user may still deliberately follow a public actor as a source.
+
+Compatibility rules:
+
+- Explicit lookup may cache a source `collection_target` preview for known
+  profile-feed software when the actor exposes both inbox and outbox.
+- Lookup should still land on the user page for these actors so personal
+  follows, unfollows, messages, and profile handling keep working.
+- Preview outboxes should unwrap embedded `Create` objects and dereference
+  bounded object IDs where needed.
+- Accept images, reviews, notes, articles, pages, audio, and video objects as
+  displayable preview items.
+- Do not insert these actors into all-communities discovery unless a separate
+  group actor is found.
 
 ### WordPress Event Bridge
 
@@ -457,7 +538,7 @@ Every federation change should keep tests for these paths:
 
 ## Live Audit Notes
 
-2026-06-04 live checks used local user `local_test_user` through the public Lotide API.
+2026-06-04 live checks used local user `remote_alice` through the public Lotide API.
 No remote posts or comments were created. Follow, unfollow, like, and unlike
 operations were restored to their original local state after each probe.
 

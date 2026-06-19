@@ -48,8 +48,11 @@ macro_rules! id_wrapper {
 }
 
 id_wrapper!(CommentLocalID);
+id_wrapper!(CollectionTargetItemCommentLocalID);
+id_wrapper!(CollectionTargetItemLocalID);
 id_wrapper!(CollectionTargetLocalID);
 id_wrapper!(CommunityLocalID);
+id_wrapper!(PrivateMessageLocalID);
 id_wrapper!(PollLocalID);
 id_wrapper!(PollOptionLocalID);
 id_wrapper!(PostLocalID);
@@ -136,6 +139,9 @@ pub enum RespNotificationInfo<'a> {
     UserFollow {
         user: RespMinimalAuthorInfo<'a>,
     },
+    PrivateMessage {
+        message: RespPrivateMessageInfo<'a>,
+    },
 }
 
 #[derive(Serialize, Clone)]
@@ -221,6 +227,25 @@ pub struct RespLikeInfo<'a> {
     pub user: RespMinimalAuthorInfo<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub federation_status: Option<RespFederationStatus>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct RespPrivateMessageInfo<'a> {
+    pub id: PrivateMessageLocalID,
+    pub author: RespMinimalAuthorInfo<'a>,
+    pub recipient: RespMinimalAuthorInfo<'a>,
+    pub created: String,
+    pub local: bool,
+    pub remote_url: Option<Cow<'a, str>>,
+    pub content_text: Option<Cow<'a, str>>,
+    pub content_markdown: Option<Cow<'a, str>>,
+    #[serde(rename = "content_html")]
+    pub content_html_safe: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<PrivateMessageLocalID>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub federation_status: Option<RespFederationStatus>,
+    pub sensitive: bool,
 }
 
 #[derive(Serialize, Clone)]

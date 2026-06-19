@@ -2,7 +2,7 @@ use super::{ExtendedPostlike, FollowLike, KnownObject, Verified};
 use crate::hyper;
 use crate::types::{
     CollectionTargetLocalID, CommentLocalID, CommunityLocalID, NotificationID, PollOptionLocalID,
-    PostLocalID, ThingLocalRef, UserLocalID,
+    PostLocalID, PrivateMessageLocalID, ThingLocalRef, UserLocalID,
 };
 use activitystreams::prelude::*;
 use serde::Deserialize;
@@ -123,6 +123,391 @@ struct ReplyTargetContext {
     community_is_local: bool,
 }
 
+fn collect_local_user_recipients(
+    out: &mut Vec<UserLocalID>,
+    recipients: Option<&activitystreams::primitives::OneOrMany<activitystreams::base::AnyBase>>,
+    host_url_apub: &crate::BaseURL,
+) {
+    if let Some(recipients) = recipients {
+        for recipient in recipients.iter() {
+            if let Some(uri) = recipient.as_xsd_any_uri() {
+                if let Some(super::LocalObjectRef::User(user)) =
+                    super::LocalObjectRef::try_from_uri(uri, host_url_apub)
+                {
+                    if !out.contains(&user) {
+                        out.push(user);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_local_user_recipients_from_json(
+    out: &mut Vec<UserLocalID>,
+    recipients: Option<&serde_json::Value>,
+    host_url_apub: &crate::BaseURL,
+) {
+    let Some(recipients) = recipients else {
+        return;
+    };
+
+    match recipients {
+        serde_json::Value::String(uri) => {
+            if let Ok(uri) = uri.parse::<activitystreams::iri_string::types::IriString>() {
+                if let Some(super::LocalObjectRef::User(user)) =
+                    super::LocalObjectRef::try_from_uri(&uri, host_url_apub)
+                {
+                    if !out.contains(&user) {
+                        out.push(user);
+                    }
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_local_user_recipients_from_json(out, Some(item), host_url_apub);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            collect_local_user_recipients_from_json(out, fields.get("id"), host_url_apub);
+            collect_local_user_recipients_from_json(out, fields.get("href"), host_url_apub);
+        }
+        _ => {}
+    }
+}
+
+fn first_reply_private_message_ref(
+    note: &ExtendedPostlike<activitystreams::object::Note>,
+    host_url_apub: &crate::BaseURL,
+) -> Option<PrivateMessageLocalID> {
+    let in_reply_to = note.in_reply_to()?;
+
+    in_reply_to.iter().find_map(|item| {
+        item.as_xsd_any_uri().and_then(|uri| {
+            match super::LocalObjectRef::try_from_uri(uri, host_url_apub) {
+                Some(super::LocalObjectRef::PrivateMessage(message)) => Some(message),
+                _ => None,
+            }
+        })
+    })
+}
+
+fn first_reply_private_message_ref_from_json(
+    in_reply_to: Option<&serde_json::Value>,
+    host_url_apub: &crate::BaseURL,
+) -> Option<PrivateMessageLocalID> {
+    match in_reply_to? {
+        serde_json::Value::String(uri) => {
+            let uri = uri
+                .parse::<activitystreams::iri_string::types::IriString>()
+                .ok()?;
+
+            match super::LocalObjectRef::try_from_uri(&uri, host_url_apub) {
+                Some(super::LocalObjectRef::PrivateMessage(message)) => Some(message),
+                _ => None,
+            }
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|item| first_reply_private_message_ref_from_json(Some(item), host_url_apub)),
+        serde_json::Value::Object(fields) => first_reply_private_message_ref_from_json(
+            fields.get("id").or_else(|| fields.get("href")),
+            host_url_apub,
+        ),
+        _ => None,
+    }
+}
+
+fn json_actor_ap_id(
+    value: Option<&serde_json::Value>,
+) -> Option<activitystreams::iri_string::types::IriString> {
+    match value? {
+        serde_json::Value::String(value) => value.parse().ok(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .find_map(|value| json_actor_ap_id(Some(value))),
+        serde_json::Value::Object(fields) => json_actor_ap_id(fields.get("id")),
+        _ => None,
+    }
+}
+
+async fn try_ingest_private_message_note(
+    note: &ExtendedPostlike<activitystreams::object::Note>,
+    object_id: Option<&activitystreams::iri_string::types::IriString>,
+    to: Option<&activitystreams::primitives::OneOrMany<activitystreams::base::AnyBase>>,
+    cc: Option<&activitystreams::primitives::OneOrMany<activitystreams::base::AnyBase>>,
+    ctx: Arc<crate::RouteContext>,
+) -> Result<bool, crate::Error> {
+    let Some(object_id) = object_id else {
+        return Ok(false);
+    };
+
+    let mut recipients = Vec::new();
+    collect_local_user_recipients(&mut recipients, to, &ctx.host_url_apub);
+    collect_local_user_recipients(&mut recipients, cc, &ctx.host_url_apub);
+
+    if recipients.is_empty() {
+        return Ok(false);
+    }
+
+    let Some(author_ap_id) = postlike_author_id(note.attributed_to()) else {
+        return Ok(false);
+    };
+
+    super::require_containment(object_id, &author_ap_id)?;
+
+    let note_content = note.content();
+    let content = note_content
+        .as_ref()
+        .and_then(|value| value.as_single_xsd_string())
+        .unwrap_or("");
+
+    if content.trim().is_empty() {
+        log::debug!("refusing to ingest empty private message {object_id}");
+        return Ok(false);
+    }
+
+    let media_type = note.media_type();
+    let content_is_html = media_type.is_none() || media_type == Some(&mime::TEXT_HTML);
+    let (content_text, content_html) = if content_is_html {
+        (None, Some(content))
+    } else {
+        (Some(content), None)
+    };
+    let created = note
+        .published()
+        .map(|value| super::offset_datetime_to_chrono(&value));
+    let sensitive = note.ext_two.sensitive.unwrap_or(false);
+    let parent = first_reply_private_message_ref(note, &ctx.host_url_apub);
+
+    let mut db = ctx.db_pool.get().await?;
+    let author = super::get_or_fetch_user_local_id(&author_ap_id, &db, &ctx).await?;
+    let mut stored_any = false;
+
+    for recipient in recipients {
+        if recipient == author {
+            continue;
+        }
+
+        let parent = if let Some(parent) = parent {
+            let row = db
+                .query_opt(
+                    "SELECT author, recipient FROM private_message WHERE id=$1 AND NOT deleted",
+                    &[&parent],
+                )
+                .await?;
+
+            match row {
+                Some(row) => {
+                    let parent_author = UserLocalID(row.get(0));
+                    let parent_recipient = UserLocalID(row.get(1));
+                    let same_conversation = (parent_author == author
+                        && parent_recipient == recipient)
+                        || (parent_author == recipient && parent_recipient == author);
+
+                    if same_conversation {
+                        Some(parent)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        let trans = db.transaction().await?;
+        let row = trans
+            .query_opt(
+                "INSERT INTO private_message (ap_id, author, recipient, local, content_text, content_html, sensitive, in_reply_to, created) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, COALESCE($8, current_timestamp)) ON CONFLICT (ap_id) DO NOTHING RETURNING id",
+                &[
+                    &object_id.as_str(),
+                    &author,
+                    &recipient,
+                    &content_text,
+                    &content_html,
+                    &sensitive,
+                    &parent,
+                    &created,
+                ],
+            )
+            .await?;
+
+        if let Some(row) = row {
+            let message_id = PrivateMessageLocalID(row.get(0));
+            trans
+                .execute(
+                    "INSERT INTO notification (kind, created_at, to_user, private_message, from_user) VALUES ('private_message', current_timestamp, $1, $2, $3)",
+                    &[&recipient, &message_id, &author],
+                )
+                .await?;
+            stored_any = true;
+        }
+
+        trans.commit().await?;
+    }
+
+    Ok(stored_any)
+}
+
+async fn try_ingest_private_message_chat_message(
+    message: &super::ChatMessage,
+    ctx: Arc<crate::RouteContext>,
+) -> Result<bool, crate::Error> {
+    let mut recipients = Vec::new();
+    collect_local_user_recipients_from_json(
+        &mut recipients,
+        message.value_field("to"),
+        &ctx.host_url_apub,
+    );
+    collect_local_user_recipients_from_json(
+        &mut recipients,
+        message.value_field("cc"),
+        &ctx.host_url_apub,
+    );
+    collect_local_user_recipients_from_json(
+        &mut recipients,
+        message.value_field("bto"),
+        &ctx.host_url_apub,
+    );
+    collect_local_user_recipients_from_json(
+        &mut recipients,
+        message.value_field("bcc"),
+        &ctx.host_url_apub,
+    );
+
+    if recipients.is_empty() {
+        return Ok(false);
+    }
+
+    let Some(author_ap_id) = json_actor_ap_id(
+        message
+            .value_field("attributedTo")
+            .or_else(|| message.value_field("actor")),
+    ) else {
+        return Ok(false);
+    };
+
+    super::require_containment(message.id(), &author_ap_id)?;
+
+    let content = message.str_field("content").unwrap_or("");
+    let source = message.value_field("source");
+    let source_content = source
+        .and_then(|source| source.get("content"))
+        .and_then(serde_json::Value::as_str);
+    let source_media_type = source
+        .and_then(|source| source.get("mediaType"))
+        .and_then(serde_json::Value::as_str);
+    let content_markdown = match (source_content, source_media_type) {
+        (Some(source_content), Some("text/markdown")) if !source_content.trim().is_empty() => {
+            Some(source_content)
+        }
+        _ => None,
+    };
+
+    if content.trim().is_empty() && content_markdown.is_none() {
+        log::debug!(
+            "refusing to ingest empty private chat message {}",
+            message.id()
+        );
+        return Ok(false);
+    }
+
+    let media_type = message.str_field("mediaType");
+    let content_is_html = media_type == Some("text/html")
+        || (media_type.is_none() && content.contains('<') && content.contains('>'));
+    let (content_text, content_html) = if content.trim().is_empty() {
+        (None, None)
+    } else if content_is_html {
+        (None, Some(content))
+    } else {
+        (Some(content), None)
+    };
+    let created = message
+        .str_field("published")
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+    let sensitive = message.bool_field("sensitive").unwrap_or(false);
+    let parent = first_reply_private_message_ref_from_json(
+        message.value_field("inReplyTo"),
+        &ctx.host_url_apub,
+    );
+
+    let mut db = ctx.db_pool.get().await?;
+    let author = super::get_or_fetch_user_local_id(&author_ap_id, &db, &ctx).await?;
+    let mut stored_any = false;
+
+    for recipient in recipients {
+        if recipient == author {
+            continue;
+        }
+
+        let parent = if let Some(parent) = parent {
+            let row = db
+                .query_opt(
+                    "SELECT author, recipient FROM private_message WHERE id=$1 AND NOT deleted",
+                    &[&parent],
+                )
+                .await?;
+
+            match row {
+                Some(row) => {
+                    let parent_author = UserLocalID(row.get(0));
+                    let parent_recipient = UserLocalID(row.get(1));
+                    let same_conversation = (parent_author == author
+                        && parent_recipient == recipient)
+                        || (parent_author == recipient && parent_recipient == author);
+
+                    if same_conversation {
+                        Some(parent)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        let trans = db.transaction().await?;
+        let row = trans
+            .query_opt(
+                "INSERT INTO private_message (ap_id, author, recipient, local, content_text, content_markdown, content_html, sensitive, in_reply_to, created, ap_object_type) VALUES ($1, $2, $3, FALSE, $4, $5, $6, $7, $8, COALESCE($9, current_timestamp), 'ChatMessage') ON CONFLICT (ap_id) DO NOTHING RETURNING id",
+                &[
+                    &message.id().as_str(),
+                    &author,
+                    &recipient,
+                    &content_text,
+                    &content_markdown,
+                    &content_html,
+                    &sensitive,
+                    &parent,
+                    &created,
+                ],
+            )
+            .await?;
+
+        if let Some(row) = row {
+            let message_id = PrivateMessageLocalID(row.get(0));
+            trans
+                .execute(
+                    "INSERT INTO notification (kind, created_at, to_user, private_message, from_user) VALUES ('private_message', current_timestamp, $1, $2, $3)",
+                    &[&recipient, &message_id, &author],
+                )
+                .await?;
+            stored_any = true;
+        }
+
+        trans.commit().await?;
+    }
+
+    Ok(stored_any)
+}
+
+const USER_FOLLOW_RESPONSE_ACTOR_SQL: &str = "SELECT id FROM person WHERE ap_id=$1";
+
 async fn mark_local_follow_response(
     db: &tokio_postgres::Client,
     actor_ap_id: &str,
@@ -135,11 +520,8 @@ async fn mark_local_follow_response(
         .await?
         .map(|row| CommunityLocalID(row.get(0)));
 
-    let user_local_id: Option<UserLocalID> = db
-        .query_opt(
-            "SELECT id FROM person WHERE local AND ap_id=$1",
-            &[&actor_ap_id],
-        )
+    let user_ap_id: Option<UserLocalID> = db
+        .query_opt(USER_FOLLOW_RESPONSE_ACTOR_SQL, &[&actor_ap_id])
         .await?
         .map(|row| UserLocalID(row.get(0)));
 
@@ -153,7 +535,7 @@ async fn mark_local_follow_response(
             super::LocalObjectRef::UserFollow(target_user_id, follower_local_id)
             | super::LocalObjectRef::UserFollowJoin(target_user_id, follower_local_id),
         ) => {
-            if user_local_id == Some(target_user_id) {
+            if user_ap_id == Some(target_user_id) {
                 db.execute(
                     "UPDATE person_follow SET accepted=$3, federation_sent_at=COALESCE(federation_sent_at, current_timestamp), federation_received_at=COALESCE(federation_received_at, current_timestamp) WHERE target=$1 AND follower=$2",
                     &[&target_user_id, &follower_local_id, &accepted],
@@ -187,6 +569,22 @@ async fn mark_local_follow_response(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod follow_response_tests {
+    #[test]
+    fn remote_user_accepts_are_allowed_to_match_user_follows() {
+        /*
+            Accepts for outbound user follows come from the remote profile, not
+            from a local account. Keeping a local-person predicate here makes
+            every Mastodon-style profile follow look permanently pending.
+        */
+        assert_eq!(
+            super::USER_FOLLOW_RESPONSE_ACTOR_SQL,
+            "SELECT id FROM person WHERE ap_id=$1"
+        );
+    }
 }
 
 struct RemoteCommunityActor<'a> {
@@ -268,6 +666,10 @@ impl FoundFrom {
     }
 
     pub fn keeps_untracked_remote_group(&self) -> bool {
+        matches!(self, FoundFrom::ExplicitLookup)
+    }
+
+    fn allows_collection_target_source(&self) -> bool {
         matches!(self, FoundFrom::ExplicitLookup)
     }
 }
@@ -658,8 +1060,16 @@ pub fn ingest_object(
 
         match (*object).into_inner() {
             KnownObject::Accept(activity) => {
-                let actor_ap_id = followlike_id(activity.actor_unchecked())
-                    .ok_or(crate::Error::InternalStrStatic("Missing actor for Accept"))?;
+                let Some(actor_ap_id) = followlike_id(activity.actor_unchecked()) else {
+                    /*
+                        A few servers acknowledge an Undo by wrapping it in an
+                        actorless Accept. That is not useful enough to update a
+                        follow row, but treating it as a hard error wedges the
+                        inbox queue on a response we can safely ignore.
+                    */
+                    log::warn!("Ignoring actorless Accept activity");
+                    return Ok(None);
+                };
 
                 /*
                     Accept activities often embed the original Follow object
@@ -977,6 +1387,10 @@ pub fn ingest_object(
             }
             KnownObject::Audio(obj) => {
                 ingest_postlike(Verified(KnownObject::Audio(obj)), found_from, ctx).await
+            }
+            KnownObject::ChatMessage(obj) => {
+                try_ingest_private_message_chat_message(&obj, ctx).await?;
+                Ok(None)
             }
             KnownObject::Create(activity) => {
                 ingest_create(Verified(activity), found_from, ctx, for_inbox).await?;
@@ -2083,6 +2497,12 @@ async fn ingest_postlike(
         });
 
     if !public {
+        if let KnownObject::Note(note) = &*obj {
+            if try_ingest_private_message_note(note, obj_id, to, cc, ctx.clone()).await? {
+                return Ok(None);
+            }
+        }
+
         log::debug!(
             "refusing to ingest non-public object {:?}",
             obj_id.map(|x| x.as_str())
@@ -2993,6 +3413,106 @@ async fn ingest_funkwhale_library(
     ))))
 }
 
+struct ActorCollectionTarget<'a> {
+    ap_id: &'a activitystreams::iri_string::types::IriString,
+    name: &'a str,
+    description_html: Option<&'a str>,
+    inbox: &'a str,
+    outbox: Option<&'a activitystreams::iri_string::types::IriString>,
+    followers: Option<&'a str>,
+    shared_inbox: Option<&'a str>,
+    owner_actor: Option<UserLocalID>,
+    profile: &'a super::target::TargetProfile,
+}
+
+async fn upsert_actor_collection_target(
+    actor: ActorCollectionTarget<'_>,
+    ctx: Arc<crate::BaseContext>,
+) -> Result<Option<CollectionTargetLocalID>, crate::Error> {
+    /*
+        Source feeds are actors, not communities.
+
+        Blog engines, stream servers, and some profile-oriented fediverse
+        projects expose a normal actor outbox that users may want to follow as
+        a read source. Store those in collection_target so follows still go to
+        the actor inbox, while the UI can preview the outbox without pretending
+        the actor is a threadiverse community.
+    */
+    let Some(outbox) = actor.outbox else {
+        return Ok(None);
+    };
+
+    let display_name = actor.name.trim();
+    let display_name = if display_name.is_empty() {
+        actor.profile.target.as_str()
+    } else {
+        display_name
+    };
+    let ap_id = actor.ap_id.as_str();
+    let target_kind = "actor_feed";
+    let software = actor.profile.target.software_key();
+    let owner_actor = actor.owner_actor.map(|id| id.raw());
+    let owner_ap_id = ap_id;
+    let first_page = outbox.as_str();
+    let owner_inbox = Some(actor.inbox);
+    let stored_first_page = Some(first_page);
+
+    let db = ctx.db_pool.get().await?;
+    let id = CollectionTargetLocalID(
+        db.query_one(
+            "INSERT INTO collection_target (
+                name,
+                target_kind,
+                software,
+                ap_id,
+                owner_actor,
+                owner_ap_id,
+                owner_inbox,
+                owner_shared_inbox,
+                followers,
+                first_page,
+                summary_html,
+                updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, current_timestamp
+            ) ON CONFLICT (ap_id) DO UPDATE SET
+                name=$1,
+                target_kind=$2,
+                software=$3,
+                owner_actor=$5,
+                owner_ap_id=$6,
+                owner_inbox=$7,
+                owner_shared_inbox=$8,
+                followers=$9,
+                first_page=$10,
+                summary_html=$11,
+                updated_at=current_timestamp
+            RETURNING id",
+            &[
+                &display_name,
+                &target_kind,
+                &software,
+                &ap_id,
+                &owner_actor,
+                &owner_ap_id,
+                &owner_inbox,
+                &actor.shared_inbox,
+                &actor.followers,
+                &stored_first_page,
+                &actor.description_html,
+            ],
+        )
+        .await?
+        .get(0),
+    );
+
+    if let Ok(first_page) = first_page.parse() {
+        super::spawn_enqueue_fetch_collection_target_preview(id, first_page, ctx);
+    }
+
+    Ok(Some(id))
+}
+
 async fn ingest_actorlike<
     K: activitystreams::base::AsBase
         + activitystreams::object::AsObject
@@ -3014,7 +3534,43 @@ async fn ingest_actorlike<
     let group_like_actor = actor_profile_is_group_like(&profile);
 
     if !group_like_actor {
-        return ingest_personlike(actor, is_bot, ctx).await;
+        let person_result = ingest_personlike(actor.clone(), is_bot, ctx.clone()).await?;
+
+        if found_from.allows_collection_target_source() && actor_profile_is_source_like(&profile) {
+            let owner_actor = match &person_result {
+                Some(IngestResult::Actor(super::ActorLocalInfo::User { id, .. })) => Some(*id),
+                _ => None,
+            };
+
+            if let Some(collection_target) = upsert_actor_collection_target(
+                actor_collection_target_from_actor(&actor, owner_actor, &profile)?,
+                ctx.clone(),
+            )
+            .await?
+            {
+                if actor_profile_lookup_prefers_source(&profile) {
+                    return Ok(Some(IngestResult::Other(ThingLocalRef::CollectionTarget(
+                        collection_target,
+                    ))));
+                }
+            }
+        }
+
+        return Ok(person_result);
+    }
+
+    if found_from.allows_collection_target_source() && actor_profile_lookup_prefers_source(&profile)
+    {
+        if let Some(collection_target) = upsert_actor_collection_target(
+            actor_collection_target_from_actor(&actor, None, &profile)?,
+            ctx.clone(),
+        )
+        .await?
+        {
+            return Ok(Some(IngestResult::Other(ThingLocalRef::CollectionTarget(
+                collection_target,
+            ))));
+        }
     }
 
     let ap_id = actor
@@ -3069,20 +3625,119 @@ async fn ingest_actorlike<
     .await
 }
 
+fn actor_collection_target_from_actor<'a, K>(
+    actor: &'a Verified<
+        activitystreams_ext::Ext1<
+            activitystreams::actor::ApActor<K>,
+            super::PublicKeyExtension<'static>,
+        >,
+    >,
+    owner_actor: Option<UserLocalID>,
+    profile: &'a super::target::TargetProfile,
+) -> Result<ActorCollectionTarget<'a>, crate::Error>
+where
+    K: activitystreams::base::AsBase
+        + activitystreams::object::AsObject
+        + activitystreams::markers::Actor
+        + Clone
+        + serde::Serialize,
+{
+    let ap_id = actor
+        .id_unchecked()
+        .ok_or(crate::Error::InternalStrStatic("Missing ID in actor"))?;
+    let name = actor
+        .preferred_username()
+        .or_else(|| {
+            actor
+                .name()
+                .and_then(|maybe| maybe.iter().find_map(|x| x.as_xsd_string()))
+        })
+        .unwrap_or("");
+    let description_html = actor
+        .summary()
+        .and_then(|maybe| maybe.iter().find_map(|x| x.as_xsd_string()));
+    let inbox = actor.inbox_unchecked().as_str();
+    let outbox = actor.outbox_unchecked();
+    let followers = actor.followers_unchecked().map(|x| x.as_str());
+    let shared_inbox = actor
+        .endpoints_unchecked()
+        .and_then(|endpoints| endpoints.shared_inbox.as_ref())
+        .map(|url| url.as_str());
+
+    Ok(ActorCollectionTarget {
+        ap_id,
+        name,
+        description_html,
+        inbox,
+        outbox,
+        followers,
+        shared_inbox,
+        owner_actor,
+        profile,
+    })
+}
+
 fn actor_profile_is_group_like(profile: &super::target::TargetProfile) -> bool {
     /*
         Some useful group-like targets are not ActivityStreams Group actors.
-        Service and Application actors can be relay groups, and blog publishers
-        can be Person actors that own a public post stream. Those are stored as
-        remote communities so the rest of lotide can follow and preview them.
+        Service and Application actors can be relay groups or collection
+        channels. Person actors are kept user-like unless an explicit lookup
+        stores them as a source feed.
     */
     matches!(
         profile.family,
         super::target::GroupTargetFamily::CollectionChannel
             | super::target::GroupTargetFamily::RelayBot
-            | super::target::GroupTargetFamily::BlogPublisher
-    ) && (profile.actor_kind != super::target::TargetActorKind::Person
-        || profile.family == super::target::GroupTargetFamily::BlogPublisher)
+    ) && profile.actor_kind != super::target::TargetActorKind::Person
+}
+
+fn actor_profile_is_source_like(profile: &super::target::TargetProfile) -> bool {
+    if !profile.has_inbox || !profile.has_outbox {
+        return false;
+    }
+
+    matches!(
+        profile.target,
+        super::target::GroupTarget::BookWyrm
+            | super::target::GroupTarget::Flipboard
+            | super::target::GroupTarget::Funkwhale
+            | super::target::GroupTarget::Gancio
+            | super::target::GroupTarget::GoToSocial
+            | super::target::GroupTarget::Iceshrimp
+            | super::target::GroupTarget::Misskey
+            | super::target::GroupTarget::Mitra
+            | super::target::GroupTarget::Mobilizon
+            | super::target::GroupTarget::Owncast
+            | super::target::GroupTarget::Pixelfed
+            | super::target::GroupTarget::Postmarks
+            | super::target::GroupTarget::Sharkey
+            | super::target::GroupTarget::Snac
+            | super::target::GroupTarget::Wafrn
+            | super::target::GroupTarget::WordPress
+            | super::target::GroupTarget::WordPressEventBridge
+            | super::target::GroupTarget::WriteFreely
+    )
+}
+
+fn actor_profile_lookup_prefers_source(profile: &super::target::TargetProfile) -> bool {
+    /*
+        For blog, event, stream, and library surfaces the source is the thing
+        the user is trying to follow. Profile-oriented services still get a
+        source row for previewing, but lookup should continue to land on the
+        normal user page for follows and messages.
+    */
+    matches!(
+        profile.target,
+        super::target::GroupTarget::Flipboard
+            | super::target::GroupTarget::Funkwhale
+            | super::target::GroupTarget::Gancio
+            | super::target::GroupTarget::Mobilizon
+            | super::target::GroupTarget::Owncast
+            | super::target::GroupTarget::Postmarks
+            | super::target::GroupTarget::WordPress
+            | super::target::GroupTarget::WordPressEventBridge
+            | super::target::GroupTarget::WriteFreely
+    )
 }
 
 async fn ingest_personlike<
@@ -3818,12 +4473,10 @@ mod tests {
             .parse::<activitystreams::iri_string::types::IriString>()
             .unwrap();
 
-        assert!(super::require_containment_or_mbin_mirror_source(
-            &object_id,
-            &author,
-            Some(&source_id)
-        )
-        .is_ok());
+        assert!(
+            super::require_containment_or_mbin_mirror_source(&object_id, &author, Some(&source_id))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -3838,12 +4491,10 @@ mod tests {
             .parse::<activitystreams::iri_string::types::IriString>()
             .unwrap();
 
-        assert!(super::require_containment_or_mbin_mirror_source(
-            &object_id,
-            &author,
-            Some(&source_id)
-        )
-        .is_err());
+        assert!(
+            super::require_containment_or_mbin_mirror_source(&object_id, &author, Some(&source_id))
+                .is_err()
+        );
     }
 
     #[test]
@@ -4094,7 +4745,7 @@ mod tests {
     }
 
     #[test]
-    fn wordpress_person_actor_is_group_like_for_blog_ingest() {
+    fn wordpress_person_actor_is_source_like_for_blog_ingest() {
         let profile = crate::apub_util::target::TargetProfile {
             target: crate::apub_util::target::GroupTarget::WordPress,
             family: crate::apub_util::target::GroupTargetFamily::BlogPublisher,
@@ -4105,7 +4756,35 @@ mod tests {
             has_featured: false,
         };
 
-        assert!(actor_profile_is_group_like(&profile));
+        assert!(!actor_profile_is_group_like(&profile));
+        assert!(actor_profile_is_source_like(&profile));
+        assert!(actor_profile_lookup_prefers_source(&profile));
+    }
+
+    #[test]
+    fn profile_source_actors_do_not_steal_user_lookup() {
+        for target in [
+            crate::apub_util::target::GroupTarget::BookWyrm,
+            crate::apub_util::target::GroupTarget::Pixelfed,
+            crate::apub_util::target::GroupTarget::GoToSocial,
+            crate::apub_util::target::GroupTarget::Misskey,
+            crate::apub_util::target::GroupTarget::Sharkey,
+            crate::apub_util::target::GroupTarget::Iceshrimp,
+        ] {
+            let profile = crate::apub_util::target::TargetProfile {
+                target,
+                family: crate::apub_util::target::GroupTargetFamily::ProfileOnly,
+                actor_kind: crate::apub_util::target::TargetActorKind::Person,
+                has_inbox: true,
+                has_outbox: true,
+                has_followers: true,
+                has_featured: false,
+            };
+
+            assert!(actor_profile_is_source_like(&profile));
+            assert!(!actor_profile_lookup_prefers_source(&profile));
+            assert!(!actor_profile_is_group_like(&profile));
+        }
     }
 
     #[test]

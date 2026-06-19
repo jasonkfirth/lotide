@@ -1,6 +1,6 @@
 [package]
 name = "lotide"
-version = "0.17.1"
+version = "0.18.0"
 authors = ["Colin Reeder <colin@vpzom.click>"]
 edition = "2024"
 license = "AGPL-3.0-or-later"

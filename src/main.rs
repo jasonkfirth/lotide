@@ -49,7 +49,8 @@ mod worker;
 
 use self::config::Config;
 use self::types::{
-    ActorLocalRef, CommentLocalID, CommunityLocalID, ImageHandling, NotificationID,
+    ActorLocalRef, CollectionTargetItemCommentLocalID, CollectionTargetItemLocalID,
+    CollectionTargetLocalID, CommentLocalID, CommunityLocalID, ImageHandling, NotificationID,
     PollOptionLocalID, PostLocalID, UserLocalID,
 };
 
@@ -669,7 +670,10 @@ pub fn get_actor_host_or_unknown<'a>(
 }
 
 pub fn get_path_and_query(url: &url::Url) -> Result<String, url::ParseError> {
-    Ok(format!("{}{}", url.path(), url.query().unwrap_or("")))
+    match url.query() {
+        Some(query) => Ok(format!("{}?{}", url.path(), query)),
+        None => Ok(url.path().to_owned()),
+    }
 }
 
 pub fn i64_to_u32_saturating(value: i64) -> u32 {
@@ -2199,6 +2203,18 @@ mod tests {
             crate::parse_db_pool_max_size(Some("9999")),
             crate::HARD_MAX_DB_POOL_MAX_SIZE
         );
+    }
+
+    #[test]
+    fn path_and_query_keeps_query_separator() {
+        let with_query: url::Url = "https://example.net/inbox?since=1&page=2".parse().unwrap();
+        assert_eq!(
+            crate::get_path_and_query(&with_query).unwrap(),
+            "/inbox?since=1&page=2"
+        );
+
+        let without_query: url::Url = "https://example.net/inbox".parse().unwrap();
+        assert_eq!(crate::get_path_and_query(&without_query).unwrap(), "/inbox");
     }
 
     #[test]

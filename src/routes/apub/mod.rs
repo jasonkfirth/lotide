@@ -1,5 +1,6 @@
 use crate::hyper;
 use crate::{
+    CollectionTargetItemCommentLocalID, CollectionTargetItemLocalID, CollectionTargetLocalID,
     CommentLocalID, CommunityLocalID, ImageHandling, PollOptionLocalID, PostLocalID, UserLocalID,
 };
 use activitystreams::prelude::*;
@@ -100,6 +101,34 @@ pub fn route_apub() -> crate::RouteNode<()> {
                                 ),
                             ),
                     ),
+            ),
+        )
+        .with_child(
+            "collection_targets",
+            crate::RouteNode::new().with_child_parse::<CollectionTargetLocalID, _>(
+                crate::RouteNode::new().with_child(
+                    "items",
+                    crate::RouteNode::new().with_child_parse::<CollectionTargetItemLocalID, _>(
+                        crate::RouteNode::new().with_child(
+                            "comments",
+                            crate::RouteNode::new()
+                                .with_child_parse::<CollectionTargetItemCommentLocalID, _>(
+                                    crate::RouteNode::new()
+                                        .with_handler_async(
+                                            hyper::Method::GET,
+                                            handler_collection_target_item_comments_get,
+                                        )
+                                        .with_child(
+                                            "create",
+                                            crate::RouteNode::new().with_handler_async(
+                                                hyper::Method::GET,
+                                                handler_collection_target_item_comments_create_get,
+                                            ),
+                                        ),
+                                ),
+                        ),
+                    ),
+                ),
             ),
         )
         .with_child(
@@ -965,6 +994,169 @@ async fn handler_comments_create_get(
             Ok(resp)
         },
     }
+}
+
+async fn collection_target_item_comment_activity_response(
+    collection_target: CollectionTargetLocalID,
+    item: CollectionTargetItemLocalID,
+    comment: CollectionTargetItemCommentLocalID,
+    ctx: Arc<crate::RouteContext>,
+    create_activity: bool,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let db = ctx.db_pool.get().await?;
+    let row = db
+        .query_opt(
+            "SELECT collection_target_item_comment.author,
+                collection_target_item_comment.content_text,
+                collection_target_item_comment.content_markdown,
+                collection_target_item_comment.content_html,
+                collection_target_item_comment.created,
+                collection_target_item_comment.local,
+                collection_target_item_comment.deleted,
+                collection_target_item_comment.sensitive,
+                collection_target_item.ap_id,
+                collection_target_item.attributed_to,
+                collection_target.owner_ap_id
+            FROM collection_target_item_comment
+            INNER JOIN collection_target_item
+                ON collection_target_item.id=collection_target_item_comment.item
+            INNER JOIN collection_target
+                ON collection_target.id=collection_target_item.collection_target
+            WHERE collection_target.id=$1
+            AND collection_target_item.id=$2
+            AND collection_target_item_comment.id=$3",
+            &[&collection_target, &item, &comment],
+        )
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(crate::simple_response(
+            hyper::StatusCode::NOT_FOUND,
+            "No such source item comment",
+        ));
+    };
+
+    let local: bool = row.get(5);
+    if !local {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::BAD_REQUEST,
+            "Requested source item comment is not owned by this instance",
+        )));
+    }
+
+    let deleted: bool = row.get(6);
+    if deleted {
+        if create_activity {
+            return Err(crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::GONE,
+                "Source item comment has been deleted",
+            )));
+        }
+
+        let mut body = activitystreams::object::Tombstone::new();
+        body.set_former_type("Note".to_owned())
+            .set_context(activitystreams::context())
+            .set_id(
+                crate::apub_util::LocalObjectRef::CollectionTargetItemComment(
+                    collection_target,
+                    item,
+                    comment,
+                )
+                .to_local_uri(&ctx.host_url_apub)
+                .into(),
+            );
+
+        let body = serde_json::to_vec(&body)?.into();
+        let mut resp = hyper::Response::new(body);
+        *resp.status_mut() = hyper::StatusCode::GONE;
+        resp.headers_mut().insert(
+            hyper::header::CONTENT_TYPE,
+            hyper::header::HeaderValue::from_static(crate::apub_util::ACTIVITY_TYPE),
+        );
+
+        return Ok(resp);
+    }
+
+    let author = UserLocalID(row.get(0));
+    let item_ap_id: url::Url = row.get::<_, &str>(8).parse()?;
+    let attributed_to = row.get::<_, Option<&str>>(9).map(str::parse).transpose()?;
+    let owner_ap_id = row.get::<_, Option<&str>>(10).map(str::parse).transpose()?;
+    let created = row.get(4);
+    let content_text: Option<&str> = row.get(1);
+    let content_markdown: Option<&str> = row.get(2);
+    let content_html: Option<&str> = row.get(3);
+    let sensitive = row.get(7);
+
+    let body = if create_activity {
+        serde_json::to_vec(
+            &crate::apub_util::local_collection_target_item_comment_to_create_ap(
+                collection_target,
+                item,
+                comment,
+                &item_ap_id,
+                owner_ap_id,
+                attributed_to,
+                author,
+                created,
+                content_text,
+                content_markdown,
+                content_html,
+                sensitive,
+                &ctx,
+            )?,
+        )?
+    } else {
+        serde_json::to_vec(
+            &crate::apub_util::local_collection_target_item_comment_to_ap(
+                collection_target,
+                item,
+                comment,
+                &item_ap_id,
+                owner_ap_id,
+                attributed_to,
+                author,
+                created,
+                content_text,
+                content_markdown,
+                content_html,
+                sensitive,
+                &ctx,
+            )?,
+        )?
+    }
+    .into();
+
+    Ok(hyper::Response::builder()
+        .header(hyper::header::CONTENT_TYPE, crate::apub_util::ACTIVITY_TYPE)
+        .body(body)?)
+}
+
+async fn handler_collection_target_item_comments_get(
+    params: (
+        CollectionTargetLocalID,
+        CollectionTargetItemLocalID,
+        CollectionTargetItemCommentLocalID,
+    ),
+    ctx: Arc<crate::RouteContext>,
+    _req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (collection_target, item, comment) = params;
+    collection_target_item_comment_activity_response(collection_target, item, comment, ctx, false)
+        .await
+}
+
+async fn handler_collection_target_item_comments_create_get(
+    params: (
+        CollectionTargetLocalID,
+        CollectionTargetItemLocalID,
+        CollectionTargetItemCommentLocalID,
+    ),
+    ctx: Arc<crate::RouteContext>,
+    _req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (collection_target, item, comment) = params;
+    collection_target_item_comment_activity_response(collection_target, item, comment, ctx, true)
+        .await
 }
 
 async fn handler_comments_delete_get(

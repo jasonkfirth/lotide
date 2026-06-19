@@ -71,7 +71,7 @@ send signed likes, follows, or unfollows.
 | Fedibird Group | `playground@gdev.fedibird.com`, `circledev@gdev.fedibird.com` | Group actor, outbox has announces | community `4802932` / older `4347762` | posts imported | comments imported | Preview, Like, and Undo Like pass against announced statuses. The live server sends signed `Reject` for Follow, so this is a remote policy exception until an accepting Fedibird group is found. |
 | Group Actor | `hob@piggo.space` | Service actor, outbox has announces | community `4451454` | posts imported | no replies in sample | Pass after deployed Service-as-community routing. |
 | WordPress ActivityPub | `blog@vivaldi.com` | Group actor at `https://vivaldi.com/?author=0` | community `4347766` | posts imported | not checked | Read pass. Classifier now recognizes WordPress actor paths. |
-| WordPress ActivityPub | `writer@example.com` | Person author actor with WordPress ActivityPub routes | community `4591381` | post imported through explicit lookup | target post advertised no replies | Read pass after WordPress blog-publisher actor fix. Signed Like reached the inbox but was rejected while WordPress fetched Lotide's signing-key profile. |
+| WordPress ActivityPub | `author@example.org` | Person author actor with WordPress ActivityPub routes | community `4591381` | post imported through explicit lookup | target post advertised no replies | Read pass after WordPress blog-publisher actor fix. Signed Like reached the inbox but was rejected while WordPress fetched Lotide's signing-key profile. |
 | WordPress Event Bridge | no live event actor | n/a | n/a | n/a | n/a | Needs a live actor or source-backed fixture. |
 | Mastodon/Pleroma/Akkoma | profile-only inbound follow class | n/a | n/a | n/a | n/a | Not a group provider. Test inbound follows separately. |
 | Smithereen | no live group actor | n/a | n/a | n/a | n/a | Needs source-backed fixtures or a supplied actor. |
@@ -93,14 +93,14 @@ Implemented and deployed after the audit:
   community insert path instead of always becoming person-like users.
 - WordPress blog-publisher `Person` actors now become group-like targets during
   explicit lookup when they own top-level posts. This allows author-backed
-  WordPress blogs such as `writer@example.com` to import posts under a
+  WordPress blogs such as `author@example.org` to import posts under a
   remote community row instead of dropping them for lack of a threadiverse
   community actor.
 - Local Person and Group actor documents now include an ActivityStreams `url`
   field alongside `id` and `publicKey`, which is friendlier to WordPress-style
   actor importers while preserving the stable ActivityPub actor IDs.
 
-Post-deployment verification on a live test instance:
+Post-deployment verification on `lotide.example`:
 
 - `/api/unstable/instance` and `/api/unstable/posts?limit=1` returned HTTP 200.
 - `gancio@gancio.cisti.org` resolved as community `4451442` and imported event
@@ -110,17 +110,18 @@ Post-deployment verification on a live test instance:
 - `hob@piggo.space` resolved as community `4451454` and imported relay posts.
 - `blog@vivaldi.com` remained a community and its WordPress actor target was
   identified as `WordPress`.
-- `writer@example.com` resolved as community `4591381`, and the example
+- `author@example.org` resolved as community `4591381`, and the example author
   WordPress permalink imported as post `530577` with AP ID
-  `https://example.com/?p=287`.
-- A signed Like to the example WordPress author's WordPress inbox failed with
+  `https://example.org/?p=287`.
+- A signed Like to example author's WordPress inbox failed with
   `activitypub_signature_verification: No Profile found or Profile not accessible`.
   The same failure reproduced with a cache-busted `keyId` and an `acct:` key ID,
   so the blocker appears to be WordPress' remote fetch of the Lotide actor/key
-  profile rather than the Like activity shape. In this class of failure, check
-  that public DNS and the local resolver both lead WordPress to the same public
-  actor URL; WordPress' safe remote fetch layer can reject private or
-  inconsistent addresses before it validates the activity itself.
+  profile rather than the Like activity shape. Public DNS for `lotide.example`
+  points at `38.18.117.195`, while the Lotide server's own resolver maps the
+  same host to private reverse-proxy addresses; matching resolver behavior on
+  the WordPress host would cause WordPress `wp_safe_remote_get` to reject the
+  actor URL as unsafe.
 
 Still open:
 

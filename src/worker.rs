@@ -106,6 +106,20 @@ UPDATE task SET state='running', attempted_at=current_timestamp, latest_error=NU
                         WHERE community_discovery_server.host=task.params->>'host' \
                         AND community_discovery_server.software IN (\
                             'wordpress', \
+                            'funkwhale', \
+                            'owncast', \
+                            'castopod', \
+                            'writefreely', \
+                            'postmarks', \
+                            'bookwyrm', \
+                            'pixelfed', \
+                            'gotosocial', \
+                            'misskey', \
+                            'sharkey', \
+                            'iceshrimp', \
+                            'snac', \
+                            'mitra', \
+                            'wafrn', \
                             'bonfire', \
                             'gancio', \
                             'mobilizon'\
@@ -168,6 +182,20 @@ UPDATE task SET state='running', attempted_at=current_timestamp, latest_error=NU
                         WHERE community_discovery_server.host=task.params->>'host' \
                         AND community_discovery_server.software IN (\
                             'wordpress', \
+                            'funkwhale', \
+                            'owncast', \
+                            'castopod', \
+                            'writefreely', \
+                            'postmarks', \
+                            'bookwyrm', \
+                            'pixelfed', \
+                            'gotosocial', \
+                            'misskey', \
+                            'sharkey', \
+                            'iceshrimp', \
+                            'snac', \
+                            'mitra', \
+                            'wafrn', \
                             'bonfire', \
                             'gancio', \
                             'mobilizon'\
@@ -660,6 +688,20 @@ ORDER BY \
         ) THEN 0 \
         WHEN community_discovery_server.software IN (\
             'wordpress', \
+            'funkwhale', \
+            'owncast', \
+            'castopod', \
+            'writefreely', \
+            'postmarks', \
+            'bookwyrm', \
+            'pixelfed', \
+            'gotosocial', \
+            'misskey', \
+            'sharkey', \
+            'iceshrimp', \
+            'snac', \
+            'mitra', \
+            'wafrn', \
             'bonfire', \
             'gancio', \
             'mobilizon'\
@@ -945,6 +987,8 @@ WITH terminal_task AS (\
         OR lower(latest_error) LIKE '%not a person%' \
         OR lower(latest_error) LIKE '%not a group%' \
         OR lower(latest_error) LIKE '%data did not match any variant of untagged enum knownobject%' \
+        OR lower(latest_error) LIKE '%data did not match any variant of untagged enum either%' \
+        OR lower(latest_error) LIKE '%notcontained%' \
         OR lower(latest_error) LIKE '%status: 400%' \
         OR lower(latest_error) LIKE '%status: 403%'\
     ) \
@@ -1151,12 +1195,23 @@ fn task_error_is_terminal(kind: &str, err: &str) -> bool {
             inbox at this point. HTML means we hit a browser page, login page,
             challenge page, or broken endpoint instead of an ActivityPub inbox.
             Retrying the same signed activity just creates queue churn.
+
+            Some threadiverse servers also return a clear "Domain ... is
+            blocked" JSON error from the inbox. That is an authorization
+            decision, not a transient transport failure, so let the normal
+            visibility-suppression path record it and stop retrying the same
+            activity.
         */
+        if err.contains("domain ") && err.contains(" is blocked") {
+            return true;
+        }
+
         return [
             "just a moment",
             "cloudflare challenge remained",
             "<!doctype html",
             "<html",
+            "domain_blocked",
         ]
         .iter()
         .any(|needle| err.contains(needle));
@@ -1182,6 +1237,8 @@ fn task_error_is_terminal(kind: &str, err: &str) -> bool {
         "not a person",
         "not a group",
         "data did not match any variant of untagged enum knownobject",
+        "data did not match any variant of untagged enum either",
+        "notcontained",
         "status: 400",
         "status: 403",
     ]
@@ -2539,6 +2596,14 @@ mod tests {
         ));
         assert!(super::task_error_is_terminal(
             "verify_and_ingest_object_from_inbox",
+            "Internal(Error(\"data did not match any variant of untagged enum Either\", line: 1, column: 66))"
+        ));
+        assert!(super::task_error_is_terminal(
+            "verify_and_ingest_object_from_inbox",
+            "Internal(NotContained)"
+        ));
+        assert!(super::task_error_is_terminal(
+            "verify_and_ingest_object_from_inbox",
             "InternalStrStatic(\"Not a Person\")"
         ));
         assert!(super::task_error_is_terminal(
@@ -2560,6 +2625,14 @@ mod tests {
         assert!(super::task_error_is_terminal(
             "deliver_to_inbox",
             "InternalStr(\"Error in remote response: <!DOCTYPE html><title>ActivityPub inbox error</title>\")"
+        ));
+        assert!(super::task_error_is_terminal(
+            "deliver_to_inbox",
+            "InternalStr(\"Error in remote response: {\\\"error\\\":\\\"unknown\\\",\\\"message\\\":\\\"Domain \\\\\\\"lotide.example\\\\\\\" is blocked\\\"}\")"
+        ));
+        assert!(super::task_error_is_terminal(
+            "deliver_to_inbox",
+            "InternalStr(\"Error in remote response: {\\\"error\\\":\\\"domain_blocked\\\"}\")"
         ));
         assert!(!super::task_error_is_terminal(
             "deliver_to_inbox",
@@ -2598,6 +2671,8 @@ mod tests {
         assert!(sql.contains("unknown content type found for activity"));
         assert!(sql.contains("not a person"));
         assert!(sql.contains("not a group"));
+        assert!(sql.contains("untagged enum either"));
+        assert!(sql.contains("notcontained"));
         assert!(sql.contains("status: 403"));
         assert!(sql.contains("SET state='failed'::lt_task_state"));
         assert!(sql.contains("attempts=max_attempts"));
@@ -3294,7 +3369,9 @@ mod tests {
         let sql = super::CLEANUP_OLD_NOTIFICATIONS_SQL;
 
         assert!(sql.contains("FROM notification"));
-        assert!(sql.contains("created_at < current_timestamp - make_interval(days => $2::INTEGER)"));
+        assert!(
+            sql.contains("created_at < current_timestamp - make_interval(days => $2::INTEGER)")
+        );
         assert!(sql.contains("person.last_checked_notifications"));
         assert!(sql.contains("LIMIT $1"));
         assert!(sql.contains("FOR UPDATE SKIP LOCKED"));

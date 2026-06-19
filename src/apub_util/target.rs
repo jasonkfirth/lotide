@@ -24,7 +24,7 @@
         - one-off live instance repair rules
 */
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /* ------------------------------------------------------------------------- */
 /* Target families                                                           */
@@ -70,6 +70,19 @@ pub enum GroupTarget {
     Funkwhale,
     WordPress,
     WordPressEventBridge,
+    WriteFreely,
+    Postmarks,
+    Owncast,
+    Castopod,
+    BookWyrm,
+    Pixelfed,
+    GoToSocial,
+    Misskey,
+    Sharkey,
+    Iceshrimp,
+    Snac,
+    Mitra,
+    Wafrn,
     Mastodon,
     Pleroma,
     UnknownGroup,
@@ -120,10 +133,73 @@ impl GroupTarget {
             GroupTarget::Funkwhale => "Funkwhale",
             GroupTarget::WordPress => "WordPress",
             GroupTarget::WordPressEventBridge => "WordPressEventBridge",
+            GroupTarget::WriteFreely => "WriteFreely",
+            GroupTarget::Postmarks => "Postmarks",
+            GroupTarget::Owncast => "Owncast",
+            GroupTarget::Castopod => "Castopod",
+            GroupTarget::BookWyrm => "BookWyrm",
+            GroupTarget::Pixelfed => "Pixelfed",
+            GroupTarget::GoToSocial => "GoToSocial",
+            GroupTarget::Misskey => "Misskey",
+            GroupTarget::Sharkey => "Sharkey",
+            GroupTarget::Iceshrimp => "Iceshrimp",
+            GroupTarget::Snac => "Snac",
+            GroupTarget::Mitra => "Mitra",
+            GroupTarget::Wafrn => "Wafrn",
             GroupTarget::Mastodon => "Mastodon",
             GroupTarget::Pleroma => "Pleroma",
             GroupTarget::UnknownGroup => "UnknownGroup",
             GroupTarget::UnknownActor => "UnknownActor",
+        }
+    }
+
+    pub fn software_key(self) -> &'static str {
+        match self {
+            GroupTarget::Lotide => "lotide",
+            GroupTarget::Lemmy => "lemmy",
+            GroupTarget::PieFed => "piefed",
+            GroupTarget::Kbin => "kbin",
+            GroupTarget::Mbin => "mbin",
+            GroupTarget::NodeBb => "nodebb",
+            GroupTarget::Discourse => "discourse",
+            GroupTarget::Friendica => "friendica",
+            GroupTarget::Mobilizon => "mobilizon",
+            GroupTarget::PeerTube => "peertube",
+            GroupTarget::Smithereen => "smithereen",
+            GroupTarget::Hubzilla => "hubzilla",
+            GroupTarget::StreamsForte => "streams_forte",
+            GroupTarget::Bonfire => "bonfire",
+            GroupTarget::Flipboard => "flipboard",
+            GroupTarget::Elgg => "elgg",
+            GroupTarget::Gancio => "gancio",
+            GroupTarget::Guppe => "guppe",
+            GroupTarget::Fedigroup => "fedigroup",
+            GroupTarget::FediGroups => "fedigroups",
+            GroupTarget::FedibirdGroup => "fedibird_group",
+            GroupTarget::ApGroups => "ap_groups",
+            GroupTarget::GroupActor => "group_actor",
+            GroupTarget::TootGroup => "tootgroup",
+            GroupTarget::BuzzRelay => "buzzrelay",
+            GroupTarget::Funkwhale => "funkwhale",
+            GroupTarget::WordPress => "wordpress",
+            GroupTarget::WordPressEventBridge => "wordpress_event_bridge",
+            GroupTarget::WriteFreely => "writefreely",
+            GroupTarget::Postmarks => "postmarks",
+            GroupTarget::Owncast => "owncast",
+            GroupTarget::Castopod => "castopod",
+            GroupTarget::BookWyrm => "bookwyrm",
+            GroupTarget::Pixelfed => "pixelfed",
+            GroupTarget::GoToSocial => "gotosocial",
+            GroupTarget::Misskey => "misskey",
+            GroupTarget::Sharkey => "sharkey",
+            GroupTarget::Iceshrimp => "iceshrimp",
+            GroupTarget::Snac => "snac",
+            GroupTarget::Mitra => "mitra",
+            GroupTarget::Wafrn => "wafrn",
+            GroupTarget::Mastodon => "mastodon",
+            GroupTarget::Pleroma => "pleroma",
+            GroupTarget::UnknownGroup => "unknown",
+            GroupTarget::UnknownActor => "unknown",
         }
     }
 }
@@ -443,9 +519,11 @@ const CHANNEL_ACTIVITIES: &[&str] = &[
 ];
 const RELAY_OBJECTS: &[&str] = &["Note", "Article", "Page"];
 const RELAY_ACTIVITIES: &[&str] = &["Accept", "Announce", "Create", "Delete", "Follow", "Undo"];
-const BLOG_OBJECTS: &[&str] = &["Article", "Note", "Page"];
+const BLOG_OBJECTS: &[&str] = &["Article", "Image", "Note", "Page"];
 const BLOG_ACTIVITIES: &[&str] = &["Accept", "Create", "Update", "Delete", "Follow", "Undo"];
-const PROFILE_OBJECTS: &[&str] = &["Note", "Article", "Page"];
+const PROFILE_OBJECTS: &[&str] = &[
+    "Article", "Audio", "Book", "Image", "Note", "Page", "Review", "Video",
+];
 const PROFILE_ACTIVITIES: &[&str] = &["Accept", "Create", "Delete", "Follow", "Like", "Undo"];
 
 pub const COMMON_ACTOR_PATH_PREFIXES: &[&[&str]] = &[
@@ -463,9 +541,12 @@ pub const COMMON_ACTOR_PATH_PREFIXES: &[&[&str]] = &[
     &["group"],
     &["activitypub", "group"],
     &["activitypub", "groups"],
+    &["api", "collections"],
     &["federation", "u"],
     &["author"],
     &["authors"],
+    &["actor"],
+    &["stream"],
     &["u"],
     &["users"],
 ];
@@ -724,9 +805,126 @@ pub const TARGET_SPECS: &[GroupTargetSpec] = &[
         capabilities: TargetCapabilities::collection_channel(),
     },
     GroupTargetSpec {
+        target: GroupTarget::WriteFreely,
+        family: GroupTargetFamily::BlogPublisher,
+        software_names: &["writefreely", "write.as"],
+        actor_path_hints: &["/api/collections/", "/@"],
+        object_types: BLOG_OBJECTS,
+        activity_types: BLOG_ACTIVITIES,
+        capabilities: TargetCapabilities::blog_publisher(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::Postmarks,
+        family: GroupTargetFamily::BlogPublisher,
+        software_names: &["postmarks"],
+        actor_path_hints: &["/@"],
+        object_types: BLOG_OBJECTS,
+        activity_types: BLOG_ACTIVITIES,
+        capabilities: TargetCapabilities::blog_publisher(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::Owncast,
+        family: GroupTargetFamily::CollectionChannel,
+        software_names: &["owncast"],
+        actor_path_hints: &["/federation/user/", "/actor", "/stream"],
+        object_types: &["Note", "Video"],
+        activity_types: CHANNEL_ACTIVITIES,
+        capabilities: TargetCapabilities::collection_channel(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::Castopod,
+        family: GroupTargetFamily::CollectionChannel,
+        software_names: &["castopod"],
+        actor_path_hints: &["/@", "/podcasts/", "/federation/podcasts/"],
+        object_types: &["Article", "Audio", "Document", "Note"],
+        activity_types: CHANNEL_ACTIVITIES,
+        capabilities: TargetCapabilities::collection_channel(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::BookWyrm,
+        family: GroupTargetFamily::ProfileOnly,
+        software_names: &["bookwyrm"],
+        actor_path_hints: &["/user/", "/users/"],
+        object_types: PROFILE_OBJECTS,
+        activity_types: PROFILE_ACTIVITIES,
+        capabilities: TargetCapabilities::profile_only(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::Pixelfed,
+        family: GroupTargetFamily::ProfileOnly,
+        software_names: &["pixelfed"],
+        actor_path_hints: &["/users/", "/@"],
+        object_types: PROFILE_OBJECTS,
+        activity_types: PROFILE_ACTIVITIES,
+        capabilities: TargetCapabilities::profile_only(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::GoToSocial,
+        family: GroupTargetFamily::ProfileOnly,
+        software_names: &["gotosocial", "go-to-social", "go to social"],
+        actor_path_hints: &["/users/"],
+        object_types: PROFILE_OBJECTS,
+        activity_types: PROFILE_ACTIVITIES,
+        capabilities: TargetCapabilities::profile_only(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::Misskey,
+        family: GroupTargetFamily::ProfileOnly,
+        software_names: &["misskey", "foundkey", "calckey", "firefish"],
+        actor_path_hints: &["/users/"],
+        object_types: PROFILE_OBJECTS,
+        activity_types: PROFILE_ACTIVITIES,
+        capabilities: TargetCapabilities::profile_only(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::Sharkey,
+        family: GroupTargetFamily::ProfileOnly,
+        software_names: &["sharkey"],
+        actor_path_hints: &["/users/"],
+        object_types: PROFILE_OBJECTS,
+        activity_types: PROFILE_ACTIVITIES,
+        capabilities: TargetCapabilities::profile_only(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::Iceshrimp,
+        family: GroupTargetFamily::ProfileOnly,
+        software_names: &["iceshrimp"],
+        actor_path_hints: &["/users/"],
+        object_types: PROFILE_OBJECTS,
+        activity_types: PROFILE_ACTIVITIES,
+        capabilities: TargetCapabilities::profile_only(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::Snac,
+        family: GroupTargetFamily::ProfileOnly,
+        software_names: &["snac"],
+        actor_path_hints: &["/"],
+        object_types: PROFILE_OBJECTS,
+        activity_types: PROFILE_ACTIVITIES,
+        capabilities: TargetCapabilities::profile_only(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::Mitra,
+        family: GroupTargetFamily::ProfileOnly,
+        software_names: &["mitra"],
+        actor_path_hints: &["/users/"],
+        object_types: PROFILE_OBJECTS,
+        activity_types: PROFILE_ACTIVITIES,
+        capabilities: TargetCapabilities::profile_only(),
+    },
+    GroupTargetSpec {
+        target: GroupTarget::Wafrn,
+        family: GroupTargetFamily::ProfileOnly,
+        software_names: &["wafrn"],
+        actor_path_hints: &["/fediverse/blog/"],
+        object_types: PROFILE_OBJECTS,
+        activity_types: PROFILE_ACTIVITIES,
+        capabilities: TargetCapabilities::profile_only(),
+    },
+    GroupTargetSpec {
         target: GroupTarget::Mastodon,
         family: GroupTargetFamily::ProfileOnly,
-        software_names: &["mastodon"],
+        software_names: &["mastodon", "hometown"],
         actor_path_hints: &["/@", "/users/"],
         object_types: PROFILE_OBJECTS,
         activity_types: PROFILE_ACTIVITIES,
@@ -870,7 +1068,22 @@ pub fn classify_actor_value(value: &Value) -> TargetProfile {
     let has_followers = value.get("followers").and_then(Value::as_str).is_some();
     let has_featured = value.get("featured").is_some();
     let family = if target.family() == GroupTargetFamily::Unknown {
-        infer_unknown_family(actor_kind, has_outbox, has_followers, has_featured)
+        if actor_is_profile_path(value)
+            && matches!(
+                actor_kind,
+                TargetActorKind::Service | TargetActorKind::Application
+            )
+        {
+            /*
+                Lemmy bot accounts can publish as Service actors while still
+                living under the normal `/u/` profile namespace. Treat those as
+                authors, not group-like services, so announced posts from bot
+                users ingest the same way as ordinary user posts.
+            */
+            GroupTargetFamily::ProfileOnly
+        } else {
+            infer_unknown_family(actor_kind, has_outbox, has_followers, has_featured)
+        }
     } else {
         target.family()
     };
@@ -894,6 +1107,7 @@ pub fn known_object_type(object: &super::KnownObject) -> Option<&'static str> {
         super::KnownObject::Event(_) => Some("Event"),
         super::KnownObject::Image(_) => Some("Image"),
         super::KnownObject::FunkwhaleLibrary(_) => Some("Library"),
+        super::KnownObject::ChatMessage(_) => Some("ChatMessage"),
         super::KnownObject::Note(_) => Some("Note"),
         super::KnownObject::Page(_) => Some("Page"),
         super::KnownObject::Question(_) => Some("Question"),
@@ -935,6 +1149,21 @@ fn actor_kind(value: &Value) -> TargetActorKind {
         Some("Application") => TargetActorKind::Application,
         _ => TargetActorKind::Unknown,
     }
+}
+
+fn actor_is_profile_path(value: &Value) -> bool {
+    let Some(id) = value.get("id").and_then(Value::as_str) else {
+        return false;
+    };
+    let Ok(url) = id.parse::<url::Url>() else {
+        return false;
+    };
+    let path = url.path();
+
+    path.starts_with("/u/")
+        || path.starts_with("/user/")
+        || path.starts_with("/users/")
+        || path.starts_with("/@")
 }
 
 fn infer_unknown_family(
@@ -1025,11 +1254,44 @@ fn classify_target(value: &Value, actor_kind: TargetActorKind) -> GroupTarget {
             {
                 return GroupTarget::WordPress;
             }
+            if actor_summary_says_built_with_postmarks(value) {
+                return GroupTarget::Postmarks;
+            }
             if contains_ci(host, "peertube") || path.starts_with("/video-channels/") {
                 return GroupTarget::PeerTube;
             }
             if contains_ci(host, "nodebb") || path.starts_with("/category/") {
                 return GroupTarget::NodeBb;
+            }
+            if contains_ci(host, "bookwyrm") {
+                return GroupTarget::BookWyrm;
+            }
+            if contains_ci(host, "pixelfed") || contains_ci(host, "gram.social") {
+                return GroupTarget::Pixelfed;
+            }
+            if contains_ci(host, "gotosocial")
+                || contains_ci(host, "z0ne.social")
+                || contains_ci(host, "tagpush.app")
+            {
+                return GroupTarget::GoToSocial;
+            }
+            if contains_ci(host, "misskey") {
+                return GroupTarget::Misskey;
+            }
+            if contains_ci(host, "sharkey") || contains_ci(host, "transfem.social") {
+                return GroupTarget::Sharkey;
+            }
+            if contains_ci(host, "iceshrimp") {
+                return GroupTarget::Iceshrimp;
+            }
+            if path.starts_with("/snac/") || contains_ci(host, "grenzland.club") {
+                return GroupTarget::Snac;
+            }
+            if contains_ci(host, "mitra") || contains_ci(host, "wizard.casa") {
+                return GroupTarget::Mitra;
+            }
+            if contains_ci(host, "wafrn") {
+                return GroupTarget::Wafrn;
             }
             if let Some(target) = target_from_actor_path(path) {
                 return target;
@@ -1106,7 +1368,16 @@ fn target_from_actor_path(path: &str) -> Option<GroupTarget> {
         for hint in spec.actor_path_hints {
             if matches!(
                 *hint,
-                "/" | "/@" | "/c/" | "/m/" | "/u/" | "/users/" | "/group/" | "/groups/"
+                "/" | "/@"
+                    | "/actor"
+                    | "/c/"
+                    | "/group/"
+                    | "/groups/"
+                    | "/m/"
+                    | "/stream"
+                    | "/u/"
+                    | "/user/"
+                    | "/users/"
             ) {
                 continue;
             }
@@ -1182,6 +1453,13 @@ fn actor_has_wp_activitypub_path(value: &Value) -> bool {
     })
 }
 
+fn actor_summary_says_built_with_postmarks(value: &Value) -> bool {
+    value
+        .get("summary")
+        .and_then(Value::as_str)
+        .is_some_and(|summary| contains_ci(summary, "built with Postmarks"))
+}
+
 /* ------------------------------------------------------------------------- */
 /* Tests                                                                     */
 /* ------------------------------------------------------------------------- */
@@ -1189,8 +1467,9 @@ fn actor_has_wp_activitypub_path(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_actor_value, classify_known_object, target_spec, FederationOperation, GroupTarget,
-        GroupTargetFamily, OperationSupport, TargetActorKind, FEDERATION_OPERATIONS, TARGET_SPECS,
+        FEDERATION_OPERATIONS, FederationOperation, GroupTarget, GroupTargetFamily,
+        OperationSupport, TARGET_SPECS, TargetActorKind, classify_actor_value,
+        classify_known_object, target_spec,
     };
 
     const REPORT_TARGETS: &[GroupTarget] = &[
@@ -1222,6 +1501,19 @@ mod tests {
         GroupTarget::Funkwhale,
         GroupTarget::WordPress,
         GroupTarget::WordPressEventBridge,
+        GroupTarget::WriteFreely,
+        GroupTarget::Postmarks,
+        GroupTarget::Owncast,
+        GroupTarget::Castopod,
+        GroupTarget::BookWyrm,
+        GroupTarget::Pixelfed,
+        GroupTarget::GoToSocial,
+        GroupTarget::Misskey,
+        GroupTarget::Sharkey,
+        GroupTarget::Iceshrimp,
+        GroupTarget::Snac,
+        GroupTarget::Mitra,
+        GroupTarget::Wafrn,
         GroupTarget::Mastodon,
         GroupTarget::Pleroma,
     ];
@@ -1309,6 +1601,8 @@ mod tests {
             GroupTarget::Gancio,
             GroupTarget::Funkwhale,
             GroupTarget::WordPressEventBridge,
+            GroupTarget::Owncast,
+            GroupTarget::Castopod,
         ] {
             let capabilities = target_spec(target).capabilities;
 
@@ -1601,6 +1895,105 @@ mod tests {
                     "inbox": "https://events.example/events/inbox"
                 }),
             ),
+            (
+                GroupTarget::WriteFreely,
+                serde_json::json!({
+                    "type": "Person",
+                    "id": "https://write.example/api/collections/news",
+                    "generator": {"name": "WriteFreely"},
+                    "preferredUsername": "news",
+                    "inbox": "https://write.example/api/collections/news/inbox",
+                    "outbox": "https://write.example/api/collections/news/outbox"
+                }),
+            ),
+            (
+                GroupTarget::Postmarks,
+                serde_json::json!({
+                    "type": "Person",
+                    "id": "https://bookmarks.example/@links",
+                    "generator": {"name": "Postmarks"},
+                    "preferredUsername": "links",
+                    "inbox": "https://bookmarks.example/@links/inbox",
+                    "outbox": "https://bookmarks.example/@links/outbox"
+                }),
+            ),
+            (
+                GroupTarget::Owncast,
+                serde_json::json!({
+                    "type": "Service",
+                    "id": "https://stream.example/federation/user/streamer",
+                    "generator": {"name": "Owncast"},
+                    "preferredUsername": "streamer",
+                    "inbox": "https://stream.example/federation/user/streamer/inbox",
+                    "outbox": "https://stream.example/federation/user/streamer/outbox"
+                }),
+            ),
+            (
+                GroupTarget::BookWyrm,
+                serde_json::json!({
+                    "type": "Person",
+                    "id": "https://books.example/user/alice",
+                    "generator": {"name": "BookWyrm"},
+                    "preferredUsername": "alice",
+                    "inbox": "https://books.example/user/alice/inbox",
+                    "outbox": "https://books.example/user/alice/outbox"
+                }),
+            ),
+            (
+                GroupTarget::Pixelfed,
+                serde_json::json!({
+                    "type": "Person",
+                    "id": "https://pix.example/users/alice",
+                    "generator": {"name": "Pixelfed"},
+                    "preferredUsername": "alice",
+                    "inbox": "https://pix.example/users/alice/inbox",
+                    "outbox": "https://pix.example/users/alice/outbox"
+                }),
+            ),
+            (
+                GroupTarget::GoToSocial,
+                serde_json::json!({
+                    "type": "Person",
+                    "id": "https://gts.example/users/alice",
+                    "generator": {"name": "GoToSocial"},
+                    "preferredUsername": "alice",
+                    "inbox": "https://gts.example/users/alice/inbox",
+                    "outbox": "https://gts.example/users/alice/outbox"
+                }),
+            ),
+            (
+                GroupTarget::Misskey,
+                serde_json::json!({
+                    "type": "Person",
+                    "id": "https://misskey.example/users/9wxyz",
+                    "software": {"name": "Misskey"},
+                    "preferredUsername": "alice",
+                    "inbox": "https://misskey.example/inbox",
+                    "outbox": "https://misskey.example/users/9wxyz/outbox"
+                }),
+            ),
+            (
+                GroupTarget::Sharkey,
+                serde_json::json!({
+                    "type": "Person",
+                    "id": "https://sharkey.example/users/9wxyz",
+                    "software": {"name": "Sharkey"},
+                    "preferredUsername": "alice",
+                    "inbox": "https://sharkey.example/inbox",
+                    "outbox": "https://sharkey.example/users/9wxyz/outbox"
+                }),
+            ),
+            (
+                GroupTarget::Iceshrimp,
+                serde_json::json!({
+                    "type": "Person",
+                    "id": "https://ice.example/users/9wxyz",
+                    "software": {"name": "Iceshrimp"},
+                    "preferredUsername": "alice",
+                    "inbox": "https://ice.example/inbox",
+                    "outbox": "https://ice.example/users/9wxyz/outbox"
+                }),
+            ),
         ];
 
         for (expected, value) in cases {
@@ -1632,6 +2025,44 @@ mod tests {
         assert_eq!(profile.target, GroupTarget::Lemmy);
         assert_eq!(profile.family, GroupTargetFamily::ThreadiverseForum);
         assert_eq!(profile.actor_kind, TargetActorKind::Group);
+    }
+
+    #[test]
+    fn postmarks_self_description_classifies_profile_actor() {
+        let profile = classify_actor_value(&serde_json::json!({
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "type": "Person",
+            "id": "https://bookmarks.example/u/links",
+            "preferredUsername": "links",
+            "summary": "An ActivityPub bookmarking and sharing site built with Postmarks",
+            "inbox": "https://bookmarks.example/api/inbox",
+            "outbox": "https://bookmarks.example/u/links/outbox",
+            "followers": "https://bookmarks.example/u/links/followers"
+        }));
+
+        assert_eq!(profile.target, GroupTarget::Postmarks);
+        assert_eq!(profile.family, GroupTargetFamily::BlogPublisher);
+        assert_eq!(profile.actor_kind, TargetActorKind::Person);
+    }
+
+    #[test]
+    fn service_actor_under_user_path_is_profile_actor() {
+        let profile = classify_actor_value(&serde_json::json!({
+            "@context": [
+                "https://join-lemmy.org/context.json",
+                "https://www.w3.org/ns/activitystreams"
+            ],
+            "type": "Service",
+            "id": "https://lemmy.example/u/feedbot",
+            "preferredUsername": "feedbot",
+            "inbox": "https://lemmy.example/u/feedbot/inbox",
+            "outbox": "https://lemmy.example/u/feedbot/outbox",
+            "followers": "https://lemmy.example/u/feedbot/followers"
+        }));
+
+        assert_eq!(profile.target, GroupTarget::UnknownActor);
+        assert_eq!(profile.family, GroupTargetFamily::ProfileOnly);
+        assert_eq!(profile.actor_kind, TargetActorKind::Service);
     }
 
     #[test]
@@ -1690,6 +2121,39 @@ mod tests {
             profile.support(FederationOperation::PreviewHistory),
             OperationSupport::BestEffort
         );
+    }
+
+    #[test]
+    fn castopod_podcast_actor_is_collection_channel() {
+        let podcast = classify_actor_value(&serde_json::json!({
+            "type": "Person",
+            "id": "https://podcasts.example/@show",
+            "preferredUsername": "show",
+            "name": "The Show",
+            "inbox": "https://podcasts.example/@show/inbox",
+            "outbox": "https://podcasts.example/@show/outbox",
+            "followers": "https://podcasts.example/@show/followers",
+            "generator": {
+                "name": "Castopod"
+            }
+        }));
+
+        assert_eq!(podcast.target, GroupTarget::Castopod);
+        assert_eq!(podcast.family, GroupTargetFamily::CollectionChannel);
+        assert_eq!(
+            podcast.support(FederationOperation::Follow),
+            OperationSupport::Required
+        );
+    }
+
+    #[test]
+    fn source_targets_have_stable_filter_keys() {
+        assert_eq!(GroupTarget::WriteFreely.software_key(), "writefreely");
+        assert_eq!(GroupTarget::Owncast.software_key(), "owncast");
+        assert_eq!(GroupTarget::Castopod.software_key(), "castopod");
+        assert_eq!(GroupTarget::BookWyrm.software_key(), "bookwyrm");
+        assert_eq!(GroupTarget::GoToSocial.software_key(), "gotosocial");
+        assert_eq!(GroupTarget::ApGroups.software_key(), "ap_groups");
     }
 
     #[test]

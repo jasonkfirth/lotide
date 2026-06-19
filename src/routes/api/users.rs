@@ -3,10 +3,10 @@ use crate::hyper;
 use crate::lang;
 use crate::types::{
     CommentLocalID, CommunityLocalID, ImageHandling, JustContentText, JustURL, PostLocalID,
-    RespAvatarInfo, RespList, RespLoginUserInfo, RespMinimalAuthorInfo, RespMinimalCommentInfo,
-    RespMinimalCommunityInfo, RespMinimalPostInfo, RespNotification, RespNotificationInfo,
-    RespPostCommentInfo, RespPostListPost, RespThingInfo, RespUserInfo, RespYourFollowInfo,
-    UserLocalID,
+    PrivateMessageLocalID, RespAvatarInfo, RespList, RespLoginUserInfo, RespMinimalAuthorInfo,
+    RespMinimalCommentInfo, RespMinimalCommunityInfo, RespMinimalPostInfo, RespNotification,
+    RespNotificationInfo, RespPostCommentInfo, RespPostListPost, RespPrivateMessageInfo,
+    RespThingInfo, RespUserInfo, RespYourFollowInfo, UserLocalID,
 };
 use serde_derive::Deserialize;
 use std::borrow::Cow;
@@ -45,6 +45,157 @@ fn user_follow_info(
             received,
         ),
     }
+}
+
+fn author_from_row<'a>(
+    row: &'a tokio_postgres::Row,
+    offset: usize,
+    ctx: &'a crate::RouteContext,
+) -> RespMinimalAuthorInfo<'a> {
+    let id = UserLocalID(row.get(offset));
+    let local: bool = row.get(offset + 2);
+    let ap_id: Option<&str> = row.get(offset + 3);
+
+    RespMinimalAuthorInfo {
+        id,
+        username: Cow::Borrowed(row.get(offset + 1)),
+        local,
+        host: crate::get_actor_host_or_unknown(local, ap_id, &ctx.local_hostname),
+        remote_url: if local {
+            Some(Cow::Owned(String::from(
+                crate::apub_util::LocalObjectRef::User(id).to_local_uri(&ctx.host_url_apub),
+            )))
+        } else {
+            ap_id.map(Cow::Borrowed)
+        },
+        avatar: row
+            .get::<_, Option<&str>>(offset + 4)
+            .map(|url| RespAvatarInfo {
+                url: ctx.process_avatar_href(url, id),
+            }),
+        is_bot: row.get(offset + 5),
+    }
+}
+
+fn private_message_from_row<'a>(
+    row: &'a tokio_postgres::Row,
+    ctx: &'a crate::RouteContext,
+    image_handling: ImageHandling,
+) -> RespPrivateMessageInfo<'a> {
+    private_message_from_row_at(row, 0, 11, 17, ctx, image_handling)
+}
+
+fn private_message_from_row_at<'a>(
+    row: &'a tokio_postgres::Row,
+    message_offset: usize,
+    author_offset: usize,
+    recipient_offset: usize,
+    ctx: &'a crate::RouteContext,
+    image_handling: ImageHandling,
+) -> RespPrivateMessageInfo<'a> {
+    let id = PrivateMessageLocalID(row.get(message_offset));
+    let local: bool = row.get(message_offset + 6);
+    let author = author_from_row(row, author_offset, ctx);
+    let recipient = author_from_row(row, recipient_offset, ctx);
+
+    RespPrivateMessageInfo {
+        id,
+        author,
+        recipient,
+        created: row
+            .get::<_, chrono::DateTime<chrono::FixedOffset>>(message_offset + 5)
+            .to_rfc3339(),
+        local,
+        remote_url: if local {
+            Some(Cow::Owned(String::from(
+                crate::apub_util::LocalObjectRef::PrivateMessage(id)
+                    .to_local_uri(&ctx.host_url_apub),
+            )))
+        } else {
+            Some(Cow::Borrowed(row.get(message_offset + 1)))
+        },
+        content_text: row
+            .get::<_, Option<&str>>(message_offset + 2)
+            .map(Cow::Borrowed),
+        content_markdown: row
+            .get::<_, Option<&str>>(message_offset + 3)
+            .map(Cow::Borrowed),
+        content_html_safe: row
+            .get::<_, Option<&str>>(message_offset + 4)
+            .map(|html| crate::clean_html(html, image_handling)),
+        in_reply_to: row
+            .get::<_, Option<_>>(message_offset + 7)
+            .map(PrivateMessageLocalID),
+        federation_status: super::local_remote_federation_status(
+            local,
+            row.get(recipient_offset + 2),
+            false,
+            row.get(message_offset + 8),
+            row.get(message_offset + 9),
+        ),
+        sensitive: row.get(message_offset + 10),
+    }
+}
+
+const PRIVATE_MESSAGE_SELECT_FIELDS: &str = "\
+private_message.id, \
+private_message.ap_id, \
+private_message.content_text, \
+private_message.content_markdown, \
+private_message.content_html, \
+private_message.created, \
+private_message.local, \
+private_message.in_reply_to, \
+private_message.federation_sent_at IS NOT NULL, \
+private_message.federation_received_at IS NOT NULL, \
+private_message.sensitive, \
+author.id, author.username, author.local, author.ap_id, author.avatar, author.is_bot, \
+recipient.id, recipient.username, recipient.local, recipient.ap_id, recipient.avatar, recipient.is_bot";
+
+fn private_message_list_sql() -> String {
+    format!(
+        "SELECT {PRIVATE_MESSAGE_SELECT_FIELDS} \
+        FROM private_message \
+        INNER JOIN person AS author ON author.id=private_message.author \
+        INNER JOIN person AS recipient ON recipient.id=private_message.recipient \
+        WHERE (private_message.author=$1 OR private_message.recipient=$1) \
+        AND ($2::BIGINT IS NULL OR private_message.author=$2 OR private_message.recipient=$2) \
+        AND NOT private_message.deleted \
+        ORDER BY private_message.created DESC, private_message.id DESC \
+        LIMIT $3"
+    )
+}
+
+fn private_message_conversation_list_sql() -> String {
+    format!(
+        "WITH latest_message AS ( \
+            SELECT DISTINCT ON (CASE WHEN private_message.author=$1 THEN private_message.recipient ELSE private_message.author END) \
+                private_message.id, \
+                private_message.created \
+            FROM private_message \
+            LEFT OUTER JOIN private_message_conversation_dismissal AS dismissal \
+                ON dismissal.owner=$1 \
+                AND dismissal.partner=(CASE WHEN private_message.author=$1 THEN private_message.recipient ELSE private_message.author END) \
+            WHERE (private_message.author=$1 OR private_message.recipient=$1) \
+            AND NOT private_message.deleted \
+            AND (dismissal.dismissed_at IS NULL OR private_message.created > dismissal.dismissed_at) \
+            ORDER BY \
+                CASE WHEN private_message.author=$1 THEN private_message.recipient ELSE private_message.author END, \
+                private_message.created DESC, \
+                private_message.id DESC \
+        ), visible_latest AS ( \
+            SELECT id \
+            FROM latest_message \
+            ORDER BY created DESC, id DESC \
+            LIMIT $2 \
+        ) \
+        SELECT {PRIVATE_MESSAGE_SELECT_FIELDS} \
+        FROM visible_latest \
+        INNER JOIN private_message ON private_message.id=visible_latest.id \
+        INNER JOIN person AS author ON author.id=private_message.author \
+        INNER JOIN person AS recipient ON recipient.id=private_message.recipient \
+        ORDER BY private_message.created DESC, private_message.id DESC"
+    )
 }
 
 struct MeOrLocalAndAdminResult {
@@ -893,7 +1044,30 @@ async fn route_unstable_users_notifications_list(
                 notification_actor.local,
                 notification_actor.ap_id,
                 notification_actor.avatar,
-                notification_actor.is_bot
+                notification_actor.is_bot,
+                private_message.id,
+                private_message.ap_id,
+                private_message.content_text,
+                private_message.content_markdown,
+                private_message.content_html,
+                private_message.created,
+                private_message.local,
+                private_message.in_reply_to,
+                private_message.federation_sent_at IS NOT NULL,
+                private_message.federation_received_at IS NOT NULL,
+                private_message.sensitive,
+                private_message_author.id,
+                private_message_author.username,
+                private_message_author.local,
+                private_message_author.ap_id,
+                private_message_author.avatar,
+                private_message_author.is_bot,
+                private_message_recipient.id,
+                private_message_recipient.username,
+                private_message_recipient.local,
+                private_message_recipient.ap_id,
+                private_message_recipient.avatar,
+                private_message_recipient.is_bot
                 FROM notification
                     LEFT OUTER JOIN reply ON (reply.id = notification.reply)
                     LEFT OUTER JOIN reply AS parent_reply ON (parent_reply.id = notification.parent_reply)
@@ -905,8 +1079,11 @@ async fn route_unstable_users_notifications_list(
                     LEFT OUTER JOIN person AS parent_reply_author ON (parent_reply_author.id = parent_reply.author)
                     LEFT OUTER JOIN person AS reply_author ON (reply_author.id = reply.author)
                     LEFT OUTER JOIN person AS notification_actor ON (notification_actor.id = notification.from_user)
+                    LEFT OUTER JOIN private_message ON (private_message.id = notification.private_message)
+                    LEFT OUTER JOIN person AS private_message_author ON (private_message_author.id = private_message.author)
+                    LEFT OUTER JOIN person AS private_message_recipient ON (private_message_recipient.id = private_message.recipient)
                 WHERE notification.to_user = $1
-                AND NOT COALESCE(reply.deleted OR parent_reply.deleted OR post.deleted OR post.deleted, FALSE)
+                AND NOT COALESCE(reply.deleted OR parent_reply.deleted OR post.deleted OR post.deleted OR private_message.deleted, FALSE)
                 ORDER BY created_at DESC LIMIT $2",
             &[&user, &limit],
         ).await?;
@@ -1222,6 +1399,10 @@ async fn route_unstable_users_notifications_list(
                 }
             });
 
+            let private_message = row
+                .get::<_, Option<i64>>(68)
+                .map(|_| private_message_from_row_at(row, 68, 79, 85, &ctx, query.image_handling));
+
             let info = match kind {
                 "post_reply" => {
                     if let Some(reply) = reply {
@@ -1277,6 +1458,9 @@ async fn route_unstable_users_notifications_list(
                 "user_follow" => {
                     notification_actor.map(|user| RespNotificationInfo::UserFollow { user })
                 }
+                "private_message" => {
+                    private_message.map(|message| RespNotificationInfo::PrivateMessage { message })
+                }
                 _ => None,
             };
 
@@ -1288,6 +1472,252 @@ async fn route_unstable_users_notifications_list(
         items: Cow::Owned(notifications),
         next_page: None,
     })
+}
+
+async fn route_unstable_users_messages_list(
+    params: (UserIDOrMe,),
+    ctx: Arc<crate::RouteContext>,
+    req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (user,) = params;
+
+    #[derive(Deserialize)]
+    struct UsersMessagesListQuery {
+        with_user: Option<UserLocalID>,
+        #[serde(default)]
+        conversations: bool,
+        #[serde(default = "super::default_image_handling")]
+        image_handling: ImageHandling,
+    }
+
+    let query: UsersMessagesListQuery =
+        serde_urlencoded::from_str(req.uri().query().unwrap_or(""))?;
+    let db = ctx.db_pool.get().await?;
+    let user = user.require_me(&req, &db).await?;
+    let with_user_raw = query.with_user.map(|id| id.raw());
+    let limit: i64 = 50;
+
+    let rows = if query.conversations && query.with_user.is_none() {
+        db.query(&private_message_conversation_list_sql(), &[&user, &limit])
+            .await?
+    } else {
+        db.query(
+            &private_message_list_sql(),
+            &[&user, &with_user_raw, &limit],
+        )
+        .await?
+    };
+
+    let messages = rows
+        .iter()
+        .map(|row| private_message_from_row(row, &ctx, query.image_handling))
+        .collect();
+
+    crate::json_response(&RespList {
+        items: Cow::Owned(messages),
+        next_page: None,
+    })
+}
+
+async fn route_unstable_users_messages_create(
+    params: (UserIDOrMe,),
+    ctx: Arc<crate::RouteContext>,
+    req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (user,) = params;
+
+    #[derive(Deserialize)]
+    struct UsersMessagesCreateBody<'a> {
+        recipient: UserLocalID,
+        content_text: Option<Cow<'a, str>>,
+        content_markdown: Option<String>,
+        in_reply_to: Option<PrivateMessageLocalID>,
+        #[serde(default)]
+        sensitive: bool,
+    }
+
+    let lang = crate::get_lang_for_req(&req);
+    let mut db = ctx.db_pool.get().await?;
+    let user = user.require_me(&req, &db).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
+    let body: UsersMessagesCreateBody = serde_json::from_slice(&body)?;
+
+    if body.recipient == user {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::BAD_REQUEST,
+            "You cannot send a private message to yourself.",
+        )));
+    }
+
+    let recipient_local: bool = db
+        .query_opt(
+            "SELECT local FROM person WHERE id=$1 AND NOT COALESCE(suspended, FALSE)",
+            &[&body.recipient],
+        )
+        .await?
+        .ok_or_else(|| {
+            crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::NOT_FOUND,
+                lang.tr(&lang::no_such_user()).into_owned(),
+            ))
+        })?
+        .get(0);
+
+    let (content_text, content_markdown, content_html, _) =
+        super::process_comment_content(&lang, body.content_text, body.content_markdown, &ctx)
+            .await?;
+
+    let new_message_id = {
+        let trans = db.transaction().await?;
+        let mut ap_object_type = String::from("Note");
+
+        if let Some(parent_id) = body.in_reply_to {
+            let row = trans
+                .query_opt(
+                    "SELECT author, recipient, ap_object_type FROM private_message WHERE id=$1 AND NOT deleted",
+                    &[&parent_id],
+                )
+                .await?
+                .ok_or_else(|| {
+                    crate::Error::UserError(crate::simple_response(
+                        hyper::StatusCode::BAD_REQUEST,
+                        "Private message parent was not found.",
+                    ))
+                })?;
+
+            let parent_author = UserLocalID(row.get(0));
+            let parent_recipient = UserLocalID(row.get(1));
+            ap_object_type = row.get(2);
+            let same_conversation = (parent_author == user && parent_recipient == body.recipient)
+                || (parent_author == body.recipient && parent_recipient == user);
+
+            if !same_conversation {
+                return Err(crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::BAD_REQUEST,
+                    "Private message replies must stay in the same conversation.",
+                )));
+            }
+        }
+
+        let temporary_ap_id = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+        let row = trans
+            .query_one(
+                "INSERT INTO private_message (ap_id, author, recipient, local, content_text, content_markdown, content_html, sensitive, in_reply_to, ap_object_type) VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9) RETURNING id",
+                &[
+                    &temporary_ap_id,
+                    &user,
+                    &body.recipient,
+                    &content_text,
+                    &content_markdown,
+                    &content_html,
+                    &body.sensitive,
+                    &body.in_reply_to,
+                    &ap_object_type,
+                ],
+            )
+            .await?;
+
+        let new_message_id = PrivateMessageLocalID(row.get(0));
+        let ap_id = crate::apub_util::LocalObjectRef::PrivateMessage(new_message_id)
+            .to_local_uri(&ctx.host_url_apub);
+
+        trans
+            .execute(
+                "UPDATE private_message SET ap_id=$1 WHERE id=$2",
+                &[&ap_id.as_str(), &new_message_id],
+            )
+            .await?;
+
+        if recipient_local {
+            trans
+                .execute(
+                    "INSERT INTO notification (kind, created_at, to_user, private_message, from_user) VALUES ('private_message', current_timestamp, $1, $2, $3)",
+                    &[&body.recipient, &new_message_id, &user],
+                )
+                .await?;
+        }
+
+        trans.commit().await?;
+        new_message_id
+    };
+
+    if !recipient_local {
+        crate::apub_util::spawn_enqueue_send_private_message(new_message_id, ctx.clone());
+    }
+
+    let row = db
+        .query_one(
+            &format!(
+                "SELECT {PRIVATE_MESSAGE_SELECT_FIELDS} \
+                FROM private_message \
+                INNER JOIN person AS author ON author.id=private_message.author \
+                INNER JOIN person AS recipient ON recipient.id=private_message.recipient \
+                WHERE private_message.id=$1"
+            ),
+            &[&new_message_id],
+        )
+        .await?;
+
+    crate::json_response(&private_message_from_row(
+        &row,
+        &ctx,
+        super::default_image_handling(),
+    ))
+}
+
+async fn route_unstable_users_messages_dismiss(
+    params: (UserIDOrMe,),
+    ctx: Arc<crate::RouteContext>,
+    req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (user,) = params;
+
+    #[derive(Deserialize)]
+    struct UsersMessagesDismissBody {
+        with_user: UserLocalID,
+    }
+
+    let db = ctx.db_pool.get().await?;
+    let user = user.require_me(&req, &db).await?;
+    let body = crate::read_request_body(req.into_body()).await?;
+    let body: UsersMessagesDismissBody = serde_json::from_slice(&body)?;
+
+    if body.with_user == user {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::BAD_REQUEST,
+            "You cannot dismiss a private conversation with yourself.",
+        )));
+    }
+
+    let has_conversation: bool = db
+        .query_one(
+            "SELECT EXISTS( \
+                SELECT 1 \
+                FROM private_message \
+                WHERE (author=$1 AND recipient=$2 OR author=$2 AND recipient=$1) \
+                AND NOT deleted \
+            )",
+            &[&user, &body.with_user],
+        )
+        .await?
+        .get(0);
+
+    if !has_conversation {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::NOT_FOUND,
+            "Private message conversation was not found.",
+        )));
+    }
+
+    db.execute(
+        "INSERT INTO private_message_conversation_dismissal (owner, partner, dismissed_at) \
+        VALUES ($1, $2, current_timestamp) \
+        ON CONFLICT (owner, partner) DO UPDATE SET dismissed_at=EXCLUDED.dismissed_at",
+        &[&user, &body.with_user],
+    )
+    .await?;
+
+    crate::json_response(&serde_json::json!({ "dismissed": true }))
 }
 
 async fn route_unstable_users_notifications_subscriptions_create(
@@ -1724,6 +2154,22 @@ pub fn route_users() -> crate::RouteNode<()> {
                     ),
                 )
                 .with_child(
+                    "messages",
+                    crate::RouteNode::new()
+                        .with_handler_async(hyper::Method::GET, route_unstable_users_messages_list)
+                        .with_handler_async(
+                            hyper::Method::POST,
+                            route_unstable_users_messages_create,
+                        ),
+                )
+                .with_child(
+                    "messages:dismiss",
+                    crate::RouteNode::new().with_handler_async(
+                        hyper::Method::POST,
+                        route_unstable_users_messages_dismiss,
+                    ),
+                )
+                .with_child(
                     "things",
                     crate::RouteNode::new()
                         .with_handler_async(hyper::Method::GET, route_unstable_users_things_list),
@@ -1749,5 +2195,24 @@ mod tests {
         );
         assert!(super::parse_avatar_media_id("https://example.com/avatar.png").is_err());
         assert!(super::parse_avatar_media_id("local-media://not-valid").is_err());
+    }
+
+    #[test]
+    fn private_message_conversation_sql_uses_dismissal_cutoff() {
+        let sql = super::private_message_conversation_list_sql();
+
+        assert!(sql.contains("DISTINCT ON"));
+        assert!(sql.contains("private_message_conversation_dismissal"));
+        assert!(sql.contains("private_message.created > dismissal.dismissed_at"));
+        assert!(sql.contains("CASE WHEN private_message.author=$1"));
+    }
+
+    #[test]
+    fn private_message_thread_sql_keeps_full_message_list() {
+        let sql = super::private_message_list_sql();
+
+        assert!(!sql.contains("DISTINCT ON"));
+        assert!(sql.contains("$2::BIGINT IS NULL"));
+        assert!(sql.contains("ORDER BY private_message.created DESC"));
     }
 }

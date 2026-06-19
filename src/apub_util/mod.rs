@@ -1,10 +1,11 @@
+use crate::BaseURL;
 use crate::hyper;
 use crate::types::{
-    ActorLocalRef, CollectionTargetLocalID, CommentLocalID, CommunityLocalID, FingerRequestQuery,
-    FingerResponse, FlagLocalID, ImageHandling, PollLocalID, PollOptionLocalID, PostLocalID,
+    ActorLocalRef, CollectionTargetItemCommentLocalID, CollectionTargetItemLocalID,
+    CollectionTargetLocalID, CommentLocalID, CommunityLocalID, FingerRequestQuery, FingerResponse,
+    FlagLocalID, ImageHandling, PollLocalID, PollOptionLocalID, PostLocalID, PrivateMessageLocalID,
     ThingLocalRef, UserLocalID,
 };
-use crate::BaseURL;
 use activitystreams::prelude::*;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -507,6 +508,7 @@ pub enum KnownObject {
             PublicKeyExtension<'static>,
         >,
     ),
+    ChatMessage(ChatMessage),
     FunkwhaleLibrary(FunkwhaleLibrary),
     Group(
         activitystreams_ext::Ext2<
@@ -546,6 +548,7 @@ impl KnownObject {
             KnownObject::Remove(obj) => obj.id_unchecked(),
             KnownObject::Service(obj) => obj.id_unchecked(),
             KnownObject::Application(obj) => obj.id_unchecked(),
+            KnownObject::ChatMessage(obj) => Some(obj.id()),
             KnownObject::FunkwhaleLibrary(obj) => Some(obj.id()),
             KnownObject::Group(obj) => obj.id_unchecked(),
             KnownObject::Article(obj) => obj.id_unchecked(),
@@ -558,6 +561,66 @@ impl KnownObject {
             KnownObject::Question(obj) => obj.id_unchecked(),
             KnownObject::Video(obj) => obj.id_unchecked(),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ChatMessage {
+    value: serde_json::Value,
+    id: activitystreams::iri_string::types::IriString,
+}
+
+/*
+    Lemmy and LitePub-compatible servers use ChatMessage for one-to-one
+    private messages. It is an ActivityPub object shape, but not one that the
+    activitystreams crate exposes as a first-class Rust type.
+
+    Keeping the original JSON here lets the DM ingest path support those
+    platforms without pretending these messages are ordinary public Notes.
+*/
+impl ChatMessage {
+    pub fn id(&self) -> &activitystreams::iri_string::types::IriString {
+        &self.id
+    }
+
+    pub fn str_field(&self, field: &str) -> Option<&str> {
+        value_str_field(&self.value, field)
+    }
+
+    pub fn value_field(&self, field: &str) -> Option<&serde_json::Value> {
+        self.value.get(field)
+    }
+
+    pub fn bool_field(&self, field: &str) -> Option<bool> {
+        self.value.get(field).and_then(serde_json::Value::as_bool)
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if value_str_field(&value, "type") != Some("ChatMessage") {
+            return Err(serde::de::Error::custom("not a ChatMessage object"));
+        }
+
+        let id: activitystreams::iri_string::types::IriString = value_str_field(&value, "id")
+            .ok_or_else(|| serde::de::Error::custom("ChatMessage object is missing id"))?
+            .parse()
+            .map_err(serde::de::Error::custom)?;
+
+        Ok(Self { value, id })
+    }
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.value.serialize(serializer)
     }
 }
 
@@ -648,11 +711,7 @@ fn single_actor_ap_id(
     let mut ids = value.iter().filter_map(any_base_ap_id);
     let id = ids.next()?;
 
-    if ids.next().is_none() {
-        Some(id)
-    } else {
-        None
-    }
+    if ids.next().is_none() { Some(id) } else { None }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -999,6 +1058,153 @@ fn next_fetch_url_for_body(
     Ok(Some(TryFrom::try_from(body_id)?))
 }
 
+fn signed_fetch_retry_status(status: hyper::StatusCode) -> bool {
+    status == hyper::StatusCode::UNAUTHORIZED || status == hyper::StatusCode::FORBIDDEN
+}
+
+fn fetch_request_path_and_query(uri: &hyper::Uri) -> &str {
+    uri.path_and_query()
+        .map(http::uri::PathAndQuery::as_str)
+        .unwrap_or("/")
+}
+
+fn append_legacy_fetch_signature_header(
+    input: &mut Vec<u8>,
+    headers: &http::HeaderMap,
+    name: http::header::HeaderName,
+) -> Result<(), crate::Error> {
+    input.extend_from_slice(b"\n");
+    input.extend_from_slice(name.as_str().as_bytes());
+    input.extend_from_slice(b": ");
+
+    let Some(value) = headers.get(&name) else {
+        return Err(crate::Error::InternalStr(format!(
+            "Missing {name} header while signing ActivityPub fetch"
+        )));
+    };
+
+    input.extend_from_slice(value.as_bytes());
+
+    Ok(())
+}
+
+fn build_legacy_activitypub_fetch_signature_input(
+    method: &http::Method,
+    path_and_query: &str,
+    headers: &http::HeaderMap,
+) -> Result<Vec<u8>, crate::Error> {
+    let mut input = format!(
+        "(request-target): {} {}",
+        method.as_str().to_ascii_lowercase(),
+        path_and_query
+    )
+    .into_bytes();
+
+    append_legacy_fetch_signature_header(&mut input, headers, http::header::HOST)?;
+    append_legacy_fetch_signature_header(&mut input, headers, http::header::DATE)?;
+
+    Ok(input)
+}
+
+fn create_legacy_activitypub_fetch_signature_header(
+    key_id: &str,
+    request_method: &http::Method,
+    request_path_and_query: &str,
+    headers: &http::HeaderMap,
+    privkey: &openssl::pkey::PKey<openssl::pkey::Private>,
+) -> Result<http::HeaderValue, crate::Error> {
+    let signature_input = build_legacy_activitypub_fetch_signature_input(
+        request_method,
+        request_path_and_query,
+        headers,
+    )?;
+    let signature = do_sign(privkey, &signature_input)?;
+
+    let mut header = format!(
+        "keyId=\"{key_id}\",algorithm=\"rsa-sha256\",headers=\"(request-target) host date\",signature=\""
+    );
+    base64::engine::general_purpose::STANDARD.encode_string(signature, &mut header);
+    header.push('"');
+
+    Ok(http::HeaderValue::from_str(&header)?)
+}
+
+fn build_unsigned_fetch_request(
+    uri: &hyper::Uri,
+    ctx: &crate::BaseContext,
+) -> Result<hyper::Request<hyper::Body>, crate::Error> {
+    let request = hyper::Request::get(uri)
+        .header(hyper::header::USER_AGENT, &ctx.user_agent)
+        .header(hyper::header::ACCEPT, ACTIVITY_TYPE_HEADER_VALUE)
+        .body(hyper::Body::default())?;
+
+    Ok(request)
+}
+
+async fn build_signed_fetch_request(
+    uri: &hyper::Uri,
+    ctx: &crate::BaseContext,
+) -> Result<hyper::Request<hyper::Body>, crate::Error> {
+    let db = ctx.db_pool.get().await?;
+    let (privkey, key_id) = fetch_or_create_local_actor_privkey(
+        ActorLocalRef::Person(UserLocalID(1)),
+        &db,
+        &ctx.host_url_apub,
+    )
+    .await?;
+
+    let authority = uri.authority().ok_or(crate::Error::InternalStrStatic(
+        "ActivityPub fetch URI had no host",
+    ))?;
+
+    let mut request = build_unsigned_fetch_request(uri, ctx)?;
+    request.headers_mut().insert(
+        hyper::header::HOST,
+        http::HeaderValue::from_str(authority.as_str())?,
+    );
+    request
+        .headers_mut()
+        .insert(hyper::header::DATE, now_http_date());
+
+    let signature = create_legacy_activitypub_fetch_signature_header(
+        key_id.as_str(),
+        &hyper::Method::GET,
+        fetch_request_path_and_query(uri),
+        request.headers(),
+        &privkey,
+    )?;
+
+    request.headers_mut().insert("Signature", signature);
+
+    Ok(request)
+}
+
+async fn send_activitypub_fetch_request(
+    uri: &hyper::Uri,
+    ctx: &crate::BaseContext,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let unsigned_request = build_unsigned_fetch_request(uri, ctx)?;
+    let unsigned_response = send_http_request(&ctx.http_client, unsigned_request).await?;
+
+    if !signed_fetch_retry_status(unsigned_response.status()) {
+        return Ok(unsigned_response);
+    }
+
+    /*
+        Some modern servers require signed reads for actors or notes even
+        when the data is otherwise public. Try the normal unsigned path first
+        so permissive servers stay cheap, then retry with our local actor key
+        only when the remote explicitly asks for authentication.
+    */
+    match build_signed_fetch_request(uri, ctx).await {
+        Ok(signed_request) => send_http_request(&ctx.http_client, signed_request).await,
+        Err(err) => {
+            log::warn!("Could not build signed ActivityPub fetch for {uri}: {err:?}");
+            Ok(unsigned_response)
+        }
+    }
+}
+
 async fn fetch_ap_object_raw_inner(
     ap_id: &(impl ApIdRef + Sync + ?Sized),
     ctx: &crate::BaseContext,
@@ -1012,11 +1218,8 @@ async fn fetch_ap_object_raw_inner(
             ));
         }
         // avoid infinite loop in malicious or broken cases
-        let request = hyper::Request::get(&current_id)
-            .header(hyper::header::USER_AGENT, &ctx.user_agent)
-            .header(hyper::header::ACCEPT, ACTIVITY_TYPE_HEADER_VALUE)
-            .body(hyper::Body::default())?;
-        let res = crate::res_to_error(send_http_request(&ctx.http_client, request).await?).await?;
+        let res =
+            crate::res_to_error(send_activitypub_fetch_request(&current_id, ctx).await?).await?;
 
         let content_type = res.headers().get(hyper::header::CONTENT_TYPE);
         let content_type_ok = match content_type {
@@ -1068,9 +1271,41 @@ pub async fn fetch_ap_object(
     ap_id: &(impl ApIdRef + Sync + ?Sized),
     ctx: &crate::BaseContext,
 ) -> Result<Verified<KnownObject>, crate::Error> {
-    let value = fetch_ap_object_raw(ap_id, ctx).await?;
+    let mut value = fetch_ap_object_raw(ap_id, ctx).await?;
+    normalize_remote_activitypub_value(&mut value);
     let value = deserialize_known_object_value(value)?;
     Ok(Verified(value))
+}
+
+fn normalize_remote_activitypub_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                normalize_remote_activitypub_value(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values.iter_mut() {
+                if key == "mediaType" {
+                    if let Some(media_type) = value.as_str() {
+                        /*
+                            A few actors put cache-busting URL queries in
+                            mediaType. The ActivityStreams model wants a MIME
+                            type there, so strip the query before typed
+                            deserialization and keep the real URL unchanged.
+                        */
+                        if let Some((clean_media_type, _)) = media_type.split_once('?') {
+                            *value = serde_json::Value::String(clean_media_type.to_owned());
+                            continue;
+                        }
+                    }
+                }
+
+                normalize_remote_activitypub_value(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn value_str_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a str> {
@@ -3358,6 +3593,175 @@ pub fn local_comment_to_create_ap(
     Ok(create)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn local_private_message_to_create_ap(
+    message_id: PrivateMessageLocalID,
+    author: UserLocalID,
+    recipient_ap_id: &url::Url,
+    created: chrono::DateTime<chrono::FixedOffset>,
+    content_text: Option<&str>,
+    content_markdown: Option<&str>,
+    content_html: Option<&str>,
+    in_reply_to_ap_id: Option<&str>,
+    sensitive: bool,
+    ap_object_type: &str,
+    ctx: &crate::BaseContext,
+) -> serde_json::Value {
+    let object_id = LocalObjectRef::PrivateMessage(message_id).to_local_uri(&ctx.host_url_apub);
+    let mut create_id = object_id.clone();
+    create_id.path_segments_mut().push("create");
+    let actor_id = LocalObjectRef::User(author).to_local_uri(&ctx.host_url_apub);
+    let recipient = recipient_ap_id.as_str();
+    let is_chat_message = ap_object_type == "ChatMessage";
+    let object_type = if is_chat_message {
+        "ChatMessage"
+    } else {
+        "Note"
+    };
+
+    let mut note = serde_json::json!({
+        "id": object_id.as_str(),
+        "type": object_type,
+        "attributedTo": actor_id.as_str(),
+        "to": [recipient],
+        "published": created.to_rfc3339()
+    });
+
+    /*
+        A direct message is intentionally not addressed to Public. The object
+        type mirrors the remote conversation where we know it, because
+        Lemmy-family and LitePub private messages use ChatMessage while
+        Mastodon-family private messages normally use Note.
+    */
+    if !is_chat_message {
+        note["sensitive"] = serde_json::Value::Bool(sensitive);
+    }
+
+    /*
+        Lemmy-family ChatMessage private messages are delivered to a user
+        inbox, but the remote private-message model is not threaded. We keep
+        the local thread so the conversation reads naturally in Hitide, then
+        omit the ActivityPub inReplyTo field for ChatMessage delivery.
+    */
+    if let (false, Some(parent)) = (is_chat_message, in_reply_to_ap_id) {
+        note["inReplyTo"] = serde_json::Value::String(parent.to_owned());
+    }
+
+    if let Some(html) = content_html {
+        note["content"] =
+            serde_json::Value::String(crate::clean_html(html, ImageHandling::Preserve));
+        note["mediaType"] = serde_json::Value::String(mime::TEXT_HTML.to_string());
+
+        if let Some(markdown) = content_markdown.or(content_text) {
+            note["source"] = serde_json::json!({
+                "content": markdown,
+                "mediaType": "text/markdown"
+            });
+        }
+    } else if is_chat_message {
+        if let Some(markdown) = content_markdown.or(content_text) {
+            note["content"] = serde_json::Value::String(crate::clean_html(
+                &crate::markdown::render_markdown_simple(markdown),
+                ImageHandling::Preserve,
+            ));
+            note["mediaType"] = serde_json::Value::String(mime::TEXT_HTML.to_string());
+            note["source"] = serde_json::json!({
+                "content": markdown,
+                "mediaType": "text/markdown"
+            });
+        }
+    } else if let Some(text) = content_text {
+        note["content"] = serde_json::Value::String(text.to_owned());
+        note["mediaType"] = serde_json::Value::String(mime::TEXT_PLAIN.to_string());
+    }
+
+    serde_json::json!({
+        "@context": activitystreams::context().as_str(),
+        "id": create_id.as_str(),
+        "type": "Create",
+        "actor": actor_id.as_str(),
+        "to": [recipient],
+        "object": note
+    })
+}
+
+pub fn spawn_enqueue_send_private_message(
+    message_id: PrivateMessageLocalID,
+    ctx: Arc<crate::RouteContext>,
+) {
+    crate::spawn_task(async move {
+        let db = ctx.db_pool.get().await?;
+
+        let row = db
+            .query_opt(
+                "SELECT private_message.author, private_message.recipient, private_message.content_text, private_message.content_markdown, private_message.content_html, private_message.created, private_message.sensitive, private_message.ap_object_type, recipient.local, recipient.ap_id, COALESCE(recipient.ap_inbox, recipient.ap_shared_inbox), parent.ap_id FROM private_message INNER JOIN person AS recipient ON recipient.id=private_message.recipient LEFT OUTER JOIN private_message AS parent ON parent.id=private_message.in_reply_to WHERE private_message.id=$1 AND private_message.local AND NOT private_message.deleted",
+                &[&message_id],
+            )
+            .await?;
+
+        let Some(row) = row else {
+            return Ok(());
+        };
+
+        let recipient_local: bool = row.get(8);
+        if recipient_local {
+            return Ok(());
+        }
+
+        let author = UserLocalID(row.get(0));
+        let recipient_ap_id = row
+            .get::<_, Option<&str>>(9)
+            .ok_or_else(|| {
+                crate::Error::InternalStr(format!(
+                    "Missing ActivityPub ID for private message recipient {}",
+                    row.get::<_, i64>(1)
+                ))
+            })?
+            .parse()?;
+        let recipient_inbox = row
+            .get::<_, Option<&str>>(10)
+            .ok_or_else(|| {
+                crate::Error::InternalStr(format!(
+                    "Missing inbox for private message recipient {}",
+                    row.get::<_, i64>(1)
+                ))
+            })?
+            .parse()?;
+        let content_text: Option<&str> = row.get(2);
+        let content_markdown: Option<&str> = row.get(3);
+        let content_html: Option<&str> = row.get(4);
+        let created: chrono::DateTime<chrono::FixedOffset> = row.get(5);
+        let sensitive: bool = row.get(6);
+        let ap_object_type: &str = row.get(7);
+        let in_reply_to_ap_id: Option<&str> = row.get(11);
+
+        let create = local_private_message_to_create_ap(
+            message_id,
+            author,
+            &recipient_ap_id,
+            created,
+            content_text,
+            content_markdown,
+            content_html,
+            in_reply_to_ap_id,
+            sensitive,
+            ap_object_type,
+            &ctx,
+        );
+
+        drop(db);
+
+        ctx.enqueue_task(&crate::tasks::DeliverToInbox {
+            inbox: Cow::Owned(recipient_inbox),
+            sign_as: Some(ActorLocalRef::Person(author)),
+            object: serde_json::to_string(&create)?,
+        })
+        .await?;
+
+        Ok(())
+    });
+}
+
 pub fn local_post_flag_to_ap(
     flag_local_id: FlagLocalID,
     content_text: Option<&str>,
@@ -3418,6 +3822,205 @@ pub fn local_post_like_to_ap(
     Ok(like)
 }
 
+pub fn local_collection_target_item_like_to_ap(
+    collection_target: CollectionTargetLocalID,
+    item: CollectionTargetItemLocalID,
+    item_ap_id: BaseURL,
+    like_ap_id: Option<BaseURL>,
+    owner_ap_id: Option<url::Url>,
+    attributed_to_ap_id: Option<url::Url>,
+    user: UserLocalID,
+    host_url_apub: &BaseURL,
+) -> Result<activitystreams::activity::Like, crate::Error> {
+    let like_ap_id = like_ap_id.unwrap_or_else(|| {
+        LocalObjectRef::CollectionTargetItemLike(collection_target, item, user)
+            .to_local_uri(host_url_apub)
+    });
+    let mut like = activitystreams::activity::Like::new(
+        crate::apub_util::LocalObjectRef::User(user).to_local_uri(host_url_apub),
+        item_ap_id,
+    );
+
+    /*
+        Source targets are not forum communities. For blogs, photo feeds, and
+        profile feeds the best common audience is the owning actor, with the
+        source item author added when the feed exposed one.
+    */
+    like.set_context(activitystreams::context())
+        .set_id(like_ap_id.into());
+
+    for audience in collection_target_item_audience(owner_ap_id, attributed_to_ap_id) {
+        like.add_to(audience);
+    }
+
+    Ok(like)
+}
+
+fn collection_target_item_audience(
+    owner_ap_id: Option<url::Url>,
+    attributed_to_ap_id: Option<url::Url>,
+) -> Vec<url::Url> {
+    let mut audience = Vec::new();
+
+    for ap_id in [owner_ap_id, attributed_to_ap_id].into_iter().flatten() {
+        if !audience.iter().any(|existing| existing == &ap_id) {
+            audience.push(ap_id);
+        }
+    }
+
+    audience
+}
+
+fn apply_source_reply_audience<T>(
+    object: &mut T,
+    owner_ap_id: Option<url::Url>,
+    attributed_to_ap_id: Option<url::Url>,
+) where
+    T: activitystreams::base::BaseExt + activitystreams::object::ObjectExt,
+{
+    /*
+        Source replies are ordinary public replies to the original object, not
+        forum posts addressed to a community actor. We still include the source
+        owner and item author as CC recipients because several blogging and
+        Mastodon-like servers use those fields to route notifications.
+    */
+    object.set_to(activitystreams::public());
+
+    for audience in collection_target_item_audience(owner_ap_id, attributed_to_ap_id) {
+        object.add_cc(audience);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn local_collection_target_item_comment_to_ap(
+    collection_target: CollectionTargetLocalID,
+    item: CollectionTargetItemLocalID,
+    comment: CollectionTargetItemCommentLocalID,
+    item_ap_id: &url::Url,
+    owner_ap_id: Option<url::Url>,
+    attributed_to_ap_id: Option<url::Url>,
+    author: UserLocalID,
+    created: chrono::DateTime<chrono::FixedOffset>,
+    content_text: Option<&str>,
+    content_markdown: Option<&str>,
+    content_html: Option<&str>,
+    sensitive: bool,
+    ctx: &crate::BaseContext,
+) -> Result<
+    activitystreams_ext::Ext1<
+        activitystreams::object::ApObject<activitystreams::object::Note>,
+        SensitiveExtension,
+    >,
+    crate::Error,
+> {
+    let mut obj = activitystreams::object::Note::new();
+
+    obj.set_context(activitystreams::context())
+        .set_id(
+            LocalObjectRef::CollectionTargetItemComment(collection_target, item, comment)
+                .to_local_uri(&ctx.host_url_apub)
+                .into(),
+        )
+        .set_attributed_to(url::Url::from(
+            LocalObjectRef::User(author).to_local_uri(&ctx.host_url_apub),
+        ))
+        .set_published(chrono_to_offset_datetime(&created))
+        .set_in_reply_to(item_ap_id.clone());
+
+    let mut obj = activitystreams::object::ApObject::new(obj);
+
+    if let Some(html) = content_html {
+        obj.set_content(crate::clean_html(html, ImageHandling::Preserve))
+            .set_media_type(mime::TEXT_HTML);
+
+        if let Some(markdown) = content_markdown {
+            let mut src = activitystreams::object::Object::<()>::new();
+            src.set_content(markdown)
+                .set_media_type("text/markdown".parse().unwrap())
+                .delete_kind();
+            obj.set_source(src.into_any_base()?);
+        }
+    } else if let Some(text) = content_text {
+        obj.set_content(text.to_owned())
+            .set_media_type(mime::TEXT_PLAIN);
+    }
+
+    apply_source_reply_audience(&mut obj, owner_ap_id, attributed_to_ap_id);
+
+    let sensitive = SensitiveExtension {
+        likes: None,
+        sensitive: Some(sensitive),
+    };
+
+    Ok(activitystreams_ext::Ext1::new(obj, sensitive))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn local_collection_target_item_comment_to_create_ap(
+    collection_target: CollectionTargetLocalID,
+    item: CollectionTargetItemLocalID,
+    comment: CollectionTargetItemCommentLocalID,
+    item_ap_id: &url::Url,
+    owner_ap_id: Option<url::Url>,
+    attributed_to_ap_id: Option<url::Url>,
+    author: UserLocalID,
+    created: chrono::DateTime<chrono::FixedOffset>,
+    content_text: Option<&str>,
+    content_markdown: Option<&str>,
+    content_html: Option<&str>,
+    sensitive: bool,
+    ctx: &crate::BaseContext,
+) -> Result<activitystreams::activity::Create, crate::Error> {
+    let note = local_collection_target_item_comment_to_ap(
+        collection_target,
+        item,
+        comment,
+        item_ap_id,
+        owner_ap_id.clone(),
+        attributed_to_ap_id.clone(),
+        author,
+        created,
+        content_text,
+        content_markdown,
+        content_html,
+        sensitive,
+        ctx,
+    )?;
+
+    let mut create = activitystreams::activity::Create::new(
+        LocalObjectRef::User(author).to_local_uri(&ctx.host_url_apub),
+        activitystreams::base::AnyBase::from_arbitrary_json(note)?,
+    );
+    create.set_context(activitystreams::context()).set_id({
+        let mut res = LocalObjectRef::CollectionTargetItemComment(collection_target, item, comment)
+            .to_local_uri(&ctx.host_url_apub);
+        res.path_segments_mut().push("create");
+        res.into()
+    });
+
+    apply_source_reply_audience(&mut create, owner_ap_id, attributed_to_ap_id);
+
+    Ok(create)
+}
+
+pub fn fresh_local_collection_target_item_like_ap_id(
+    collection_target: CollectionTargetLocalID,
+    item: CollectionTargetItemLocalID,
+    user: UserLocalID,
+    host_url_apub: &BaseURL,
+) -> Result<BaseURL, crate::Error> {
+    let mut res: url::Url = LocalObjectRef::CollectionTargetItemLike(collection_target, item, user)
+        .to_local_uri(host_url_apub)
+        .into();
+    let activity = uuid::Uuid::new_v4().to_string();
+
+    res.query_pairs_mut().append_pair("activity", &activity);
+
+    res.try_into().map_err(|_| {
+        crate::Error::InternalStrStatic("Fresh collection target item like URL cannot be a base")
+    })
+}
+
 pub fn fresh_local_post_like_ap_id(
     post_local_id: PostLocalID,
     user: UserLocalID,
@@ -3471,6 +4074,46 @@ pub fn local_post_like_undo_to_ap(
     });
 
     apply_group_interaction_audience(&mut undo, community_ap_id, author_ap_id);
+
+    Ok(undo)
+}
+
+pub fn local_collection_target_item_like_undo_to_ap(
+    undo_id: uuid::Uuid,
+    collection_target: CollectionTargetLocalID,
+    item: CollectionTargetItemLocalID,
+    item_ap_id: BaseURL,
+    like_ap_id: Option<BaseURL>,
+    owner_ap_id: Option<url::Url>,
+    attributed_to_ap_id: Option<url::Url>,
+    user: UserLocalID,
+    host_url_apub: &BaseURL,
+) -> Result<activitystreams::activity::Undo, crate::Error> {
+    let like = local_collection_target_item_like_to_ap(
+        collection_target,
+        item,
+        item_ap_id,
+        like_ap_id,
+        owner_ap_id.clone(),
+        attributed_to_ap_id.clone(),
+        user,
+        host_url_apub,
+    )?;
+
+    let mut undo = activitystreams::activity::Undo::new(
+        LocalObjectRef::User(user).to_local_uri(host_url_apub),
+        like.into_any_base()?,
+    );
+    undo.set_context(activitystreams::context()).set_id({
+        let mut res = host_url_apub.clone();
+        res.path_segments_mut()
+            .extend(&["collection_target_item_like_undos", &undo_id.to_string()]);
+        res.into()
+    });
+
+    for audience in collection_target_item_audience(owner_ap_id, attributed_to_ap_id) {
+        undo.add_to(audience);
+    }
 
     Ok(undo)
 }
@@ -4194,8 +4837,7 @@ mod tests {
             followers: "https://spectra.video/video-channels/fediforum_demos/followers",
             author: "https://spectra.video/accounts/fediforum",
             post: "https://spectra.video/videos/watch/a72ea3ba-ddcd-40f6-af9f-8219b72bd6ac",
-            comment:
-                "https://spectra.video/videos/watch/a72ea3ba-ddcd-40f6-af9f-8219b72bd6ac/comments/1",
+            comment: "https://spectra.video/videos/watch/a72ea3ba-ddcd-40f6-af9f-8219b72bd6ac/comments/1",
         },
         OutgoingWriteTarget {
             platform: "mobilizon",
@@ -4928,6 +5570,123 @@ mod tests {
     }
 
     #[test]
+    fn source_item_likes_deduplicate_owner_and_author_audience() {
+        let host_url_apub: crate::BaseURL = "https://lotide.example/apub".parse().unwrap();
+        let owner: url::Url = "https://bookmarks.example/u/links".parse().unwrap();
+        let item: crate::BaseURL = "https://bookmarks.example/m/example".parse().unwrap();
+
+        let like = super::local_collection_target_item_like_to_ap(
+            crate::types::CollectionTargetLocalID(36),
+            crate::types::CollectionTargetItemLocalID(306),
+            item.clone(),
+            None,
+            Some(owner.clone()),
+            Some(owner.clone()),
+            crate::UserLocalID(1),
+            &host_url_apub,
+        )
+        .unwrap();
+        let like_value = serde_json::to_value(&like).unwrap();
+
+        assert_eq!(field_values(&like_value, "to"), vec![owner.to_string()]);
+
+        let undo = super::local_collection_target_item_like_undo_to_ap(
+            "8534eaef-3dcb-4681-962e-44e309f199d8".parse().unwrap(),
+            crate::types::CollectionTargetLocalID(36),
+            crate::types::CollectionTargetItemLocalID(306),
+            item,
+            None,
+            Some(owner.clone()),
+            Some(owner.clone()),
+            crate::UserLocalID(1),
+            &host_url_apub,
+        )
+        .unwrap();
+        let undo_value = serde_json::to_value(&undo).unwrap();
+
+        assert_eq!(field_values(&undo_value, "to"), vec![owner.to_string()]);
+        assert_eq!(
+            field_values(&undo_value["object"], "to"),
+            vec![owner.to_string()]
+        );
+    }
+
+    #[test]
+    fn source_item_comments_are_public_replies_to_original_items() {
+        let ctx = test_context();
+        let item_ap_id: url::Url = "https://blog.example/posts/1".parse().unwrap();
+        let owner: url::Url = "https://blog.example/ap/actor".parse().unwrap();
+        let author: url::Url = "https://blog.example/users/alice".parse().unwrap();
+        let created = chrono::DateTime::parse_from_rfc3339("2026-06-19T12:30:00Z").unwrap();
+
+        let create = super::local_collection_target_item_comment_to_create_ap(
+            crate::types::CollectionTargetLocalID(12),
+            crate::types::CollectionTargetItemLocalID(44),
+            crate::types::CollectionTargetItemCommentLocalID(6),
+            &item_ap_id,
+            Some(owner.clone()),
+            Some(author.clone()),
+            crate::UserLocalID(1),
+            created,
+            None,
+            Some("Good post."),
+            Some("<p>Good post.</p>"),
+            false,
+            &ctx,
+        )
+        .unwrap();
+        let value = serde_json::to_value(&create).unwrap();
+
+        assert_eq!(value["type"].as_str(), Some("Create"));
+        assert_eq!(
+            value["id"].as_str(),
+            Some("https://lotide.example/apub/collection_targets/12/items/44/comments/6/create")
+        );
+        assert_eq!(
+            field_values(&value, "to"),
+            vec![activitystreams::public().to_string()]
+        );
+        assert_eq!(
+            field_values(&value, "cc"),
+            vec![owner.to_string(), author.to_string()]
+        );
+        assert_eq!(
+            value["object"]["id"].as_str(),
+            Some("https://lotide.example/apub/collection_targets/12/items/44/comments/6")
+        );
+        assert_eq!(
+            value["object"]["inReplyTo"].as_str(),
+            Some(item_ap_id.as_str())
+        );
+        assert_eq!(
+            value["object"]["source"]["mediaType"].as_str(),
+            Some("text/markdown")
+        );
+    }
+
+    #[test]
+    fn signed_fetch_input_covers_path_query_host_and_date() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "example.social".parse().unwrap());
+        headers.insert(
+            http::header::DATE,
+            "Thu, 18 Jun 2026 00:00:00 GMT".parse().unwrap(),
+        );
+
+        let input = super::build_legacy_activitypub_fetch_signature_input(
+            &http::Method::GET,
+            "/users/alice?activity=true",
+            &headers,
+        )
+        .unwrap();
+
+        assert_eq!(
+            String::from_utf8(input).unwrap(),
+            "(request-target): get /users/alice?activity=true\nhost: example.social\ndate: Thu, 18 Jun 2026 00:00:00 GMT"
+        );
+    }
+
+    #[test]
     fn outgoing_post_creates_match_platform_matrix_targets() {
         let ctx = test_context();
         let post_owned = test_post_info_owned();
@@ -5404,6 +6163,168 @@ mod tests {
     }
 
     #[test]
+    fn incoming_private_note_create_parses_for_litepub_direct_messages() {
+        let value = serde_json::json!({
+            "@context": [
+                "https://www.w3.org/ns/activitystreams",
+                "https://social.example/schemas/litepub-0.1.jsonld",
+                { "@language": "und" }
+            ],
+            "id": "https://social.example/activities/69f768f6-d05b-454b-a185-6df56b1254da",
+            "type": "Create",
+            "actor": "https://social.example/users/remote_alice",
+            "directMessage": true,
+            "to": ["https://lotide.example/apub/users/1"],
+            "cc": [],
+            "object": {
+                "id": "https://social.example/objects/b81579aa-0058-400d-b90d-c0311b264fcb",
+                "type": "Note",
+                "actor": "https://social.example/users/remote_alice",
+                "attributedTo": "https://social.example/users/remote_alice",
+                "to": ["https://lotide.example/apub/users/1"],
+                "cc": [],
+                "content": "<span class=\"h-card\"><a class=\"u-url mention\" href=\"https://lotide.example/apub/users/1\" rel=\"ugc\">@<span>remote_alice</span></a></span> hello me, how am I doing?",
+                "source": {
+                    "content": "@remote_alice@lotide.example hello me, how am I doing?",
+                    "mediaType": "text/plain"
+                },
+                "tag": [{
+                    "href": "https://lotide.example/apub/users/1",
+                    "name": "@remote_alice@lotide.example",
+                    "type": "Mention"
+                }],
+                "published": "2026-06-18T10:25:02.537037Z",
+                "sensitive": false
+            }
+        });
+
+        let object: super::KnownObject = serde_json::from_value(value).unwrap();
+        match object {
+            super::KnownObject::Create(create) => {
+                let value = serde_json::to_value(create).unwrap();
+                assert_eq!(value["type"].as_str(), Some("Create"));
+                assert_eq!(value["object"]["type"].as_str(), Some("Note"));
+                assert_eq!(
+                    field_values(&value["object"], "to"),
+                    vec!["https://lotide.example/apub/users/1".to_owned()]
+                );
+                assert!(field_values(&value["object"], "cc").is_empty());
+            }
+            _ => panic!("expected private Note Create"),
+        }
+    }
+
+    #[test]
+    fn incoming_private_chat_messages_parse_for_platform_families() {
+        let messages = [
+            serde_json::json!({
+                "id": "https://hilariouschaos.com/private_message/2045",
+                "type": "ChatMessage",
+                "attributedTo": "https://hilariouschaos.com/u/RemoteAlice",
+                "to": ["https://lotide.example/apub/users/1"],
+                "content": "<p>hello me, fancy meeting me here!</p>\n",
+                "mediaType": "text/html",
+                "source": {
+                    "content": "hello me, fancy meeting me here!",
+                    "mediaType": "text/markdown"
+                },
+                "published": "2026-06-18T09:12:55.326105Z"
+            }),
+            serde_json::json!({
+                "id": "https://social.example/objects/e774fa96-a074-4659-9fa2-1d2389fdba23",
+                "type": "ChatMessage",
+                "actor": "https://social.example/users/remote_alice",
+                "attributedTo": "https://social.example/users/remote_alice",
+                "to": ["https://lotide.example/apub/users/1"],
+                "content": "Hello me, fancy meeting me here.",
+                "published": "2026-06-18T09:22:37.474054Z"
+            }),
+        ];
+
+        for value in messages {
+            let object: super::KnownObject = serde_json::from_value(value).unwrap();
+
+            match object {
+                super::KnownObject::ChatMessage(message) => {
+                    assert_eq!(message.str_field("type"), Some("ChatMessage"));
+                    assert!(message.str_field("content").is_some());
+                }
+                _ => panic!("expected incoming private ChatMessage"),
+            }
+        }
+    }
+
+    #[test]
+    fn outgoing_private_chat_messages_match_lemmy_shape() {
+        let ctx = test_context();
+        let recipient = "https://social.example/users/remote_alice".parse().unwrap();
+        let created = chrono::DateTime::parse_from_rfc3339("2026-06-18T09:30:00Z").unwrap();
+        let create = super::local_private_message_to_create_ap(
+            crate::types::PrivateMessageLocalID(42),
+            crate::UserLocalID(1),
+            &recipient,
+            created,
+            Some("Hello back."),
+            None,
+            None,
+            Some("https://social.example/objects/parent"),
+            false,
+            "ChatMessage",
+            &ctx,
+        );
+
+        assert_eq!(create["type"].as_str(), Some("Create"));
+        assert_eq!(create["object"]["type"].as_str(), Some("ChatMessage"));
+        assert!(create["object"].get("inReplyTo").is_none());
+        assert!(create["object"].get("sensitive").is_none());
+        assert_eq!(create["object"]["mediaType"].as_str(), Some("text/html"));
+        assert_eq!(
+            create["object"]["source"]["content"].as_str(),
+            Some("Hello back.")
+        );
+        assert_eq!(
+            create["object"]["source"]["mediaType"].as_str(),
+            Some("text/markdown")
+        );
+        assert_eq!(field_values(&create, "to"), vec![recipient.to_string()]);
+        assert_eq!(
+            field_values(&create["object"], "to"),
+            vec![recipient.to_string()]
+        );
+        assert!(!field_values(&create, "to").contains(&activitystreams::public().to_string()));
+    }
+
+    #[test]
+    fn outgoing_private_notes_keep_direct_message_threading() {
+        let ctx = test_context();
+        let recipient = "https://social.example/users/remote_alice".parse().unwrap();
+        let created = chrono::DateTime::parse_from_rfc3339("2026-06-18T09:30:00Z").unwrap();
+        let create = super::local_private_message_to_create_ap(
+            crate::types::PrivateMessageLocalID(43),
+            crate::UserLocalID(1),
+            &recipient,
+            created,
+            Some("Hello back."),
+            None,
+            None,
+            Some("https://social.example/objects/parent"),
+            true,
+            "Note",
+            &ctx,
+        );
+
+        assert_eq!(create["type"].as_str(), Some("Create"));
+        assert_eq!(create["object"]["type"].as_str(), Some("Note"));
+        assert_eq!(
+            create["object"]["inReplyTo"].as_str(),
+            Some("https://social.example/objects/parent")
+        );
+        assert_eq!(create["object"]["sensitive"].as_bool(), Some(true));
+        assert_eq!(create["object"]["mediaType"].as_str(), Some("text/plain"));
+        assert_eq!(field_values(&create, "to"), vec![recipient.to_string()]);
+    }
+
+    #[test]
     fn incoming_group_likes_parse_for_platform_families() {
         let likes = [
             serde_json::json!({
@@ -5812,9 +6733,11 @@ mod tests {
             "id": "https://spectra.video/videos/watch/a72ea3ba-ddcd-40f6-af9f-8219b72bd6ac"
         });
 
-        assert!(super::verify_embedded_known_object(value, false)
-            .unwrap()
-            .is_none());
+        assert!(
+            super::verify_embedded_known_object(value, false)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -1,17 +1,19 @@
 use crate::hyper;
 use crate::lang;
 use crate::types::{
+    ActorLocalRef, CollectionTargetItemCommentLocalID, CollectionTargetItemLocalID,
     CollectionTargetLocalID, CommentLocalID, CommunityLocalID, ImageHandling, JustURL, PostLocalID,
     RespAvatarInfo, RespFederationStatus, RespList, RespLoginInfo, RespLoginPermissions,
     RespLoginUserInfo, RespMinimalAuthorInfo, RespMinimalCommentInfo, RespMinimalCommunityInfo,
     RespMinimalPostInfo, RespPermissionInfo, RespPostCommentInfo, RespPostListPost,
     RespSiteModlogEvent, RespSiteModlogEventDetails, RespYourFollowInfo, RespYourVoteInfo,
-    UserLocalID,
+    ThingLocalRef, UserLocalID,
 };
 use futures::StreamExt;
 use serde_derive::Deserialize;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -79,6 +81,160 @@ pub fn local_remote_vote_info(
             received,
         ),
     }
+}
+
+fn clean_source_html(value: &str) -> String {
+    crate::clean_html(value, ImageHandling::ConvertToLinks)
+}
+
+fn clean_source_html_owned(value: Option<String>) -> Option<String> {
+    value.map(|html| clean_source_html(&html))
+}
+
+fn clean_source_reader_html_owned(value: Option<String>) -> Option<String> {
+    value.map(|html| crate::clean_html(&html, ImageHandling::Preserve))
+}
+
+const SOURCE_SUMMARY_EXCERPT_MAX_CHARS: usize = 220;
+
+fn source_summary_excerpt(value: Option<&str>) -> Option<String> {
+    /*
+        Source lists need enough context to be useful without turning into a
+        feed reader. Store the full sanitized summary for the detail page, but
+        expose a short text-only excerpt for list rows.
+    */
+    let cleaned = clean_source_html(value?);
+    let text = collapse_source_summary_text(&strip_source_summary_tags(&cleaned));
+
+    if text.is_empty() {
+        None
+    } else {
+        Some(truncate_source_summary_text(
+            &text,
+            SOURCE_SUMMARY_EXCERPT_MAX_CHARS,
+        ))
+    }
+}
+
+fn strip_source_summary_tags(src: &str) -> String {
+    let mut output = String::with_capacity(src.len());
+    let mut in_tag = false;
+
+    for ch in src.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                output.push(' ');
+            }
+            _ if !in_tag => output.push(ch),
+            _ => {}
+        }
+    }
+
+    output
+}
+
+fn collapse_source_summary_text(src: &str) -> String {
+    let decoded = decode_source_summary_entities(src);
+    let mut output = String::with_capacity(decoded.len());
+    let mut pending_space = false;
+
+    for ch in decoded.chars() {
+        if ch.is_whitespace() {
+            pending_space = !output.is_empty();
+        } else {
+            if pending_space && !matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}') {
+                output.push(' ');
+            }
+
+            pending_space = false;
+            output.push(ch);
+        }
+    }
+
+    output
+}
+
+fn truncate_source_summary_text(src: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    let mut truncated = false;
+
+    for (idx, ch) in src.chars().enumerate() {
+        if idx == max_chars {
+            truncated = true;
+            break;
+        }
+
+        output.push(ch);
+    }
+
+    if truncated {
+        output.push_str("...");
+    }
+
+    output
+}
+
+fn decode_source_summary_entities(src: &str) -> String {
+    let mut decoded = src.to_owned();
+
+    for _ in 0..2 {
+        let next = decode_source_summary_entities_once(&decoded);
+
+        if next == decoded {
+            break;
+        }
+
+        decoded = next;
+    }
+
+    decoded
+}
+
+fn decode_source_summary_entities_once(src: &str) -> String {
+    let mut output = String::with_capacity(src.len());
+    let mut rest = src;
+
+    while let Some(start) = rest.find('&') {
+        output.push_str(&rest[..start]);
+        let after_amp = &rest[start + 1..];
+
+        let Some(end) = after_amp.find(';').filter(|end| *end <= 16) else {
+            output.push('&');
+            rest = after_amp;
+            continue;
+        };
+
+        let entity = &after_amp[..end];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+                u32::from_str_radix(&entity[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            _ if entity.starts_with('#') => entity[1..].parse().ok().and_then(char::from_u32),
+            _ => None,
+        };
+
+        if let Some(decoded) = decoded {
+            output.push(decoded);
+        } else {
+            output.push('&');
+            output.push_str(entity);
+            output.push(';');
+        }
+
+        rest = &after_amp[end + 1..];
+    }
+
+    output.push_str(rest);
+    output
 }
 
 #[derive(Debug)]
@@ -453,27 +609,64 @@ pub fn route_api() -> crate::RouteNode<()> {
                 .with_child("communities", communities::route_communities())
                 .with_child(
                     "collection_targets",
-                    crate::RouteNode::new().with_child_parse::<CollectionTargetLocalID, _>(
-                        crate::RouteNode::new()
-                            .with_handler_async(
-                                hyper::Method::GET,
-                                route_unstable_collection_targets_get,
-                            )
-                            .with_child(
-                                "follow",
-                                crate::RouteNode::new().with_handler_async(
-                                    hyper::Method::POST,
-                                    route_unstable_collection_targets_follow,
+                    crate::RouteNode::new()
+                        .with_handler_async(
+                            hyper::Method::GET,
+                            route_unstable_collection_targets_list,
+                        )
+                        .with_child_parse::<CollectionTargetLocalID, _>(
+                            crate::RouteNode::new()
+                                .with_handler_async(
+                                    hyper::Method::GET,
+                                    route_unstable_collection_targets_get,
+                                )
+                                .with_child(
+                                    "items",
+                                    crate::RouteNode::new().with_child_parse::<
+                                        CollectionTargetItemLocalID,
+                                        _,
+                                    >(
+                                        crate::RouteNode::new()
+                                            .with_handler_async(
+                                                hyper::Method::GET,
+                                                route_unstable_collection_target_items_get,
+                                            )
+                                            .with_child(
+                                                "comments",
+                                                crate::RouteNode::new().with_handler_async(
+                                                    hyper::Method::POST,
+                                                    route_unstable_collection_target_items_comment,
+                                                ),
+                                            )
+                                            .with_child(
+                                                "your_vote",
+                                                crate::RouteNode::new()
+                                                    .with_handler_async(
+                                                        hyper::Method::PUT,
+                                                        route_unstable_collection_target_items_like,
+                                                    )
+                                                    .with_handler_async(
+                                                        hyper::Method::DELETE,
+                                                        route_unstable_collection_target_items_unlike,
+                                                    ),
+                                            ),
+                                    ),
+                                )
+                                .with_child(
+                                    "follow",
+                                    crate::RouteNode::new().with_handler_async(
+                                        hyper::Method::POST,
+                                        route_unstable_collection_targets_follow,
+                                    ),
+                                )
+                                .with_child(
+                                    "unfollow",
+                                    crate::RouteNode::new().with_handler_async(
+                                        hyper::Method::POST,
+                                        route_unstable_collection_targets_unfollow,
+                                    ),
                                 ),
-                            )
-                            .with_child(
-                                "unfollow",
-                                crate::RouteNode::new().with_handler_async(
-                                    hyper::Method::POST,
-                                    route_unstable_collection_targets_unfollow,
-                                ),
-                            ),
-                    ),
+                        ),
                 )
                 .with_child(
                     "instance",
@@ -887,6 +1080,53 @@ async fn fetch_object_for_lookup(
             log::debug!("object lookup failed for {uri}: {primary_err:?}");
             Err(primary_err)
         }
+    }
+}
+
+fn lookup_value_url(value: &serde_json::Value) -> Option<url::Url> {
+    match value {
+        serde_json::Value::String(value) => value.parse().ok(),
+        serde_json::Value::Array(values) => values.iter().find_map(lookup_value_url),
+        serde_json::Value::Object(map) => ["id", "url", "href"]
+            .iter()
+            .filter_map(|field| map.get(*field))
+            .find_map(lookup_value_url),
+        _ => None,
+    }
+}
+
+async fn cache_explicit_source_object_lookup(
+    object: &crate::apub_util::Verified<crate::apub_util::KnownObject>,
+    ctx: &Arc<crate::RouteContext>,
+) -> Result<Option<ThingLocalRef>, crate::Error> {
+    let value = serde_json::to_value(&object.0)?;
+    let Some(actor_url) = ["attributedTo", "actor"]
+        .iter()
+        .filter_map(|field| value.get(*field))
+        .find_map(lookup_value_url)
+    else {
+        return Ok(None);
+    };
+
+    let db = ctx.db_pool.get().await?;
+    let Some(row) = db
+        .query_opt(
+            "SELECT id FROM collection_target WHERE owner_ap_id=$1 OR ap_id=$1 ORDER BY id LIMIT 1",
+            &[&actor_url.as_str()],
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    let collection_target = CollectionTargetLocalID(row.get(0));
+    if crate::tasks::cache_collection_target_preview_item_from_value(&db, collection_target, &value)
+        .await?
+        .is_some()
+    {
+        Ok(Some(ThingLocalRef::CollectionTarget(collection_target)))
+    } else {
+        Ok(None)
     }
 }
 
@@ -2547,6 +2787,8 @@ async fn route_unstable_objects_lookup(
                 }
             };
 
+            let source_lookup = cache_explicit_source_object_lookup(&obj, &ctx).await?;
+
             crate::apub_util::ingest::ingest_object_boxed(
                 obj,
                 crate::apub_util::ingest::FoundFrom::ExplicitLookup,
@@ -2554,6 +2796,8 @@ async fn route_unstable_objects_lookup(
                 false,
             )
             .await?
+            .map(crate::apub_util::ingest::IngestResult::into_ref)
+            .or(source_lookup)
         }
         None => None,
     };
@@ -2562,8 +2806,396 @@ async fn route_unstable_objects_lookup(
         None => Ok(crate::common_response_builder()
             .header(hyper::header::CONTENT_TYPE, "application/json")
             .body("[]".into())?),
-        Some(res) => crate::json_response(&[res.into_ref()]),
+        Some(res) => crate::json_response(&[res]),
     }
+}
+
+const COLLECTION_TARGET_SOFTWARE_SQL: &str = "\
+CASE \
+WHEN COALESCE(collection_target.software, '') <> '' THEN lower(collection_target.software) \
+WHEN collection_target.target_kind ILIKE '%funkwhale%' THEN 'funkwhale' \
+WHEN collection_target.target_kind ILIKE '%wordpress%' \
+    OR collection_target.ap_id ILIKE '%/wp-json/activitypub/%' THEN 'wordpress' \
+WHEN collection_target.ap_id ILIKE '%flipboard.com/%' THEN 'flipboard' \
+WHEN collection_target.ap_id ILIKE '%fedigroups.social/%' THEN 'fedigroups' \
+ELSE collection_target.target_kind \
+END";
+
+const COLLECTION_TARGET_LIST_FROM_SQL: &str = "\
+ FROM collection_target \
+LEFT JOIN LATERAL (\
+    SELECT lower(regexp_replace(substring(collection_target.ap_id from '^https?://([^/]+)'), '^www\\.', '')) AS host\
+) AS target_host ON TRUE \
+LEFT JOIN community_discovery_server AS discovery_server \
+    ON discovery_server.host=target_host.host \
+LEFT JOIN LATERAL (\
+    SELECT COUNT(*) AS preview_item_count \
+    FROM collection_target_item \
+    WHERE collection_target_item.collection_target=collection_target.id\
+) AS preview_stats ON TRUE \
+LEFT JOIN LATERAL (\
+    SELECT name, url, published \
+    FROM collection_target_item \
+    WHERE collection_target_item.collection_target=collection_target.id \
+    ORDER BY published DESC NULLS LAST, id DESC \
+    LIMIT 1\
+) AS latest_preview ON TRUE";
+
+const COLLECTION_TARGET_EVERYTHING_SCOPE_VISIBILITY_SQL: &str = "\
+ AND NOT EXISTS (\
+    SELECT 1 FROM blocked_ap_id \
+    WHERE blocked_ap_id.ap_id=collection_target.ap_id\
+) \
+AND NOT EXISTS (\
+    SELECT 1 FROM community_discovery_server \
+    WHERE community_discovery_server.host=target_host.host \
+    AND (\
+        community_discovery_server.suppressed_reason IS NOT NULL \
+        OR NOT community_discovery_server.active\
+    )\
+) \
+AND (\
+    COALESCE(collection_target.total_items, 0) > 0 \
+    OR COALESCE(preview_stats.preview_item_count, 0) > 0 \
+    OR EXISTS (\
+        SELECT 1 FROM collection_target_follow \
+        WHERE collection_target_follow.collection_target=collection_target.id\
+    )\
+)";
+
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CollectionTargetsListScope {
+    Mine,
+    Everything,
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CollectionTargetsSortType {
+    Alphabetic,
+    Latest,
+    Items,
+    Software,
+}
+
+impl CollectionTargetsSortType {
+    fn sort_sql(self) -> &'static str {
+        match self {
+            Self::Alphabetic => "collection_target.name ASC, collection_target.ap_id ASC",
+            Self::Latest => {
+                "latest_preview.published DESC NULLS LAST, collection_target.updated_at DESC, collection_target.name ASC"
+            }
+            Self::Items => {
+                "collection_target.total_items DESC NULLS LAST, preview_stats.preview_item_count DESC, collection_target.name ASC"
+            }
+            Self::Software => {
+                "source_software ASC, collection_target.name ASC, collection_target.ap_id ASC"
+            }
+        }
+    }
+}
+
+fn default_collection_targets_limit() -> i64 {
+    100
+}
+
+fn default_collection_targets_sort() -> CollectionTargetsSortType {
+    CollectionTargetsSortType::Alphabetic
+}
+
+fn normalize_collection_target_software_filter(
+    value: Option<&str>,
+) -> Result<Option<&'static str>, crate::Error> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    match value {
+        "all" => Ok(None),
+        "funkwhale" | "funkwhale_library" => Ok(Some("funkwhale")),
+        "wordpress" => Ok(Some("wordpress")),
+        "wordpress_event_bridge" => Ok(Some("wordpress_event_bridge")),
+        "flipboard" => Ok(Some("flipboard")),
+        "fedigroups" | "fedigroup" => Ok(Some("fedigroups")),
+        "fedibird_group" => Ok(Some("fedibird_group")),
+        "buzzrelay" => Ok(Some("buzzrelay")),
+        "guppe" => Ok(Some("guppe")),
+        "ap_groups" => Ok(Some("ap_groups")),
+        "group_actor" => Ok(Some("group_actor")),
+        "tootgroup" => Ok(Some("tootgroup")),
+        "mobilizon" => Ok(Some("mobilizon")),
+        "gancio" => Ok(Some("gancio")),
+        "bonfire" => Ok(Some("bonfire")),
+        "writefreely" => Ok(Some("writefreely")),
+        "postmarks" => Ok(Some("postmarks")),
+        "owncast" => Ok(Some("owncast")),
+        "castopod" => Ok(Some("castopod")),
+        "bookwyrm" => Ok(Some("bookwyrm")),
+        "pixelfed" => Ok(Some("pixelfed")),
+        "gotosocial" => Ok(Some("gotosocial")),
+        "misskey" => Ok(Some("misskey")),
+        "sharkey" => Ok(Some("sharkey")),
+        "iceshrimp" => Ok(Some("iceshrimp")),
+        "snac" => Ok(Some("snac")),
+        "mitra" => Ok(Some("mitra")),
+        "wafrn" => Ok(Some("wafrn")),
+        "unknown" => Ok(Some("unknown")),
+        _ => Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::BAD_REQUEST,
+            "Invalid source software filter".to_owned(),
+        ))),
+    }
+}
+
+fn append_collection_target_search_filter(where_sql: &mut String, param_index: usize) {
+    write!(
+        where_sql,
+        " AND (\
+            collection_target.name ILIKE '%' || ${param_index} || '%' \
+            OR collection_target.ap_id ILIKE '%' || ${param_index} || '%' \
+            OR COALESCE(collection_target.owner_ap_id, '') ILIKE '%' || ${param_index} || '%' \
+            OR COALESCE(collection_target.software, '') ILIKE '%' || ${param_index} || '%' \
+            OR collection_target.target_kind ILIKE '%' || ${param_index} || '%' \
+            OR COALESCE(collection_target.summary_html, '') ILIKE '%' || ${param_index} || '%' \
+            OR COALESCE(target_host.host, '') ILIKE '%' || ${param_index} || '%' \
+            OR COALESCE(latest_preview.name, '') ILIKE '%' || ${param_index} || '%'\
+        )"
+    )
+    .unwrap();
+}
+
+async fn route_unstable_collection_targets_list(
+    (): (),
+    ctx: Arc<crate::RouteContext>,
+    req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    #[derive(Deserialize)]
+    struct CollectionTargetsListQuery<'a> {
+        search: Option<Cow<'a, str>>,
+
+        #[serde(default)]
+        include_your: bool,
+
+        #[serde(default = "default_collection_targets_limit")]
+        limit: i64,
+
+        page_number: Option<i64>,
+
+        scope: Option<CollectionTargetsListScope>,
+
+        software: Option<Cow<'a, str>>,
+
+        #[serde(default = "default_collection_targets_sort")]
+        sort: CollectionTargetsSortType,
+    }
+
+    let query: CollectionTargetsListQuery =
+        serde_urlencoded::from_str(req.uri().query().unwrap_or(""))?;
+    let offset_page = match query.page_number {
+        None => 1,
+        Some(page_number) if page_number > 0 => page_number,
+        Some(_) => return Err(InvalidPage.into_user_error()),
+    };
+    let limit = query.limit.clamp(1, 150);
+    let offset_rows = (offset_page - 1) * limit;
+    let scope = query
+        .scope
+        .unwrap_or(CollectionTargetsListScope::Everything);
+
+    let db = ctx.db_pool.get().await?;
+    let login_user_maybe = if query.include_your || scope == CollectionTargetsListScope::Mine {
+        Some(crate::require_login(&req, &db).await?)
+    } else {
+        None
+    };
+    let include_your_for = if query.include_your {
+        login_user_maybe.as_ref().copied()
+    } else {
+        None
+    };
+
+    let mut where_sql = String::from(" WHERE TRUE ");
+    let mut values: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+
+    if let Some(search) = query
+        .search
+        .as_ref()
+        .filter(|search| !search.trim().is_empty())
+    {
+        values.push(search);
+        append_collection_target_search_filter(&mut where_sql, values.len());
+    }
+
+    match scope {
+        CollectionTargetsListScope::Mine => {
+            values.push(login_user_maybe.as_ref().unwrap());
+            write!(
+                where_sql,
+                " AND collection_target.id IN (\
+                    SELECT collection_target \
+                    FROM collection_target_follow \
+                    WHERE follower=${} \
+                    AND accepted\
+                )",
+                values.len()
+            )
+            .unwrap();
+        }
+        CollectionTargetsListScope::Everything => {
+            where_sql.push_str(COLLECTION_TARGET_EVERYTHING_SCOPE_VISIBILITY_SQL);
+        }
+    }
+
+    let software_counts_sql = format!(
+        "SELECT source_software, COUNT(*) \
+        FROM (\
+            SELECT collection_target.id, {COLLECTION_TARGET_SOFTWARE_SQL} AS source_software \
+            {COLLECTION_TARGET_LIST_FROM_SQL}{where_sql}\
+        ) AS source_count \
+        GROUP BY source_software \
+        ORDER BY COUNT(*) DESC, source_software ASC"
+    );
+    let software_counts = db
+        .query(&software_counts_sql, &values)
+        .await?
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "software": row.get::<_, String>(0),
+                "count": row.get::<_, i64>(1),
+            })
+        })
+        .collect::<Vec<_>>();
+    let scope_total_count: i64 = software_counts
+        .iter()
+        .filter_map(|count| count.get("count").and_then(serde_json::Value::as_i64))
+        .sum();
+
+    let software_filter =
+        normalize_collection_target_software_filter(query.software.as_deref())?.map(str::to_owned);
+    if let Some(software_filter) = &software_filter {
+        values.push(software_filter);
+        write!(
+            where_sql,
+            " AND {COLLECTION_TARGET_SOFTWARE_SQL}=${}",
+            values.len()
+        )
+        .unwrap();
+    }
+
+    let count_sql = format!("SELECT COUNT(*) {COLLECTION_TARGET_LIST_FROM_SQL}{where_sql}");
+    let total_count: i64 = db.query_one(&count_sql, &values).await?.get(0);
+
+    let mut sql = format!(
+        "SELECT collection_target.id, collection_target.target_kind, \
+        {COLLECTION_TARGET_SOFTWARE_SQL} AS source_software, \
+        collection_target.name, collection_target.ap_id, \
+        collection_target.owner_actor, collection_target.owner_ap_id, \
+        collection_target.total_items, COALESCE(preview_stats.preview_item_count, 0), \
+        latest_preview.name, latest_preview.published, latest_preview.url, \
+        collection_target.summary_html"
+    );
+
+    if let Some(user) = &include_your_for {
+        values.push(user);
+        let user_param = values.len();
+        write!(
+            sql,
+            ", (SELECT accepted FROM collection_target_follow WHERE collection_target=collection_target.id AND follower=${user_param}), \
+            (SELECT local FROM collection_target_follow WHERE collection_target=collection_target.id AND follower=${user_param}), \
+            (SELECT federation_sent_at IS NOT NULL FROM collection_target_follow WHERE collection_target=collection_target.id AND follower=${user_param}), \
+            (SELECT federation_received_at IS NOT NULL FROM collection_target_follow WHERE collection_target=collection_target.id AND follower=${user_param}), \
+            (SELECT federation_sent_at IS NOT NULL FROM local_collection_target_follow_undo WHERE collection_target=collection_target.id AND follower=${user_param} ORDER BY created_at DESC LIMIT 1), \
+            (SELECT federation_received_at IS NOT NULL FROM local_collection_target_follow_undo WHERE collection_target=collection_target.id AND follower=${user_param} ORDER BY created_at DESC LIMIT 1)"
+        )
+        .unwrap();
+    }
+
+    sql.push(' ');
+    sql.push_str(COLLECTION_TARGET_LIST_FROM_SQL);
+    sql.push_str(&where_sql);
+    write!(sql, " ORDER BY {}", query.sort.sort_sql()).unwrap();
+
+    let limit_plus_1 = limit + 1;
+    values.push(&limit_plus_1);
+    write!(sql, " LIMIT ${}", values.len()).unwrap();
+
+    values.push(&offset_rows);
+    write!(sql, " OFFSET ${}", values.len()).unwrap();
+
+    let mut rows = db.query(&sql, &values).await?;
+    let next_page = if rows.len() > limit.try_into().unwrap() {
+        rows.pop();
+        Some(offset_page.saturating_add(1).to_string())
+    } else {
+        None
+    };
+
+    let items = rows
+        .iter()
+        .map(|row| {
+            let latest_preview_published: Option<chrono::DateTime<chrono::FixedOffset>> =
+                row.get(10);
+            let your_follow = if query.include_your {
+                row.get::<_, Option<bool>>(13).map(|accepted| {
+                    RespYourFollowInfo {
+                        accepted,
+                        federation_status: local_remote_federation_status(
+                            row.get::<_, Option<bool>>(14).unwrap_or(false),
+                            false,
+                            accepted,
+                            row.get::<_, Option<bool>>(15).unwrap_or(false),
+                            row.get::<_, Option<bool>>(16).unwrap_or(false),
+                        ),
+                    }
+                })
+            } else {
+                None
+            };
+            let latest_unfollow_status = if query.include_your {
+                match (
+                    row.get::<_, Option<bool>>(17),
+                    row.get::<_, Option<bool>>(18),
+                ) {
+                    (Some(sent), Some(received)) => {
+                        local_remote_federation_status(true, false, false, sent, received)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            serde_json::json!({
+                "id": CollectionTargetLocalID(row.get(0)),
+                "type": row.get::<_, &str>(1),
+                "software": row.get::<_, &str>(2),
+                "name": row.get::<_, &str>(3),
+                "remote_url": row.get::<_, &str>(4),
+                "owner": {
+                    "id": row.get::<_, Option<i64>>(5).map(UserLocalID),
+                    "remote_url": row.get::<_, Option<&str>>(6),
+                },
+                "total_items": row.get::<_, Option<i64>>(7),
+                "preview_item_count": row.get::<_, i64>(8),
+                "latest_preview_item": row.get::<_, Option<&str>>(9),
+                "latest_preview_published": latest_preview_published.map(|value| value.to_rfc3339()),
+                "latest_preview_url": row.get::<_, Option<&str>>(11),
+                "summary_excerpt": source_summary_excerpt(row.get::<_, Option<&str>>(12)),
+                "your_follow": your_follow,
+                "latest_unfollow_status": latest_unfollow_status,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    crate::json_response(&serde_json::json!({
+        "items": items,
+        "next_page": next_page,
+        "total_count": total_count,
+        "scope_total_count": scope_total_count,
+        "software_counts": software_counts,
+    }))
 }
 
 async fn route_unstable_collection_targets_get(
@@ -2587,6 +3219,8 @@ async fn route_unstable_collection_targets_get(
                 "No such collection target",
             ))
         })?;
+    let software = row.get::<_, Option<&str>>(3);
+    let preview_item_likes_supported = collection_target_item_likes_supported(software);
 
     let your_follow = if let Some(user) = user {
         db.query_opt(
@@ -2626,8 +3260,54 @@ async fn route_unstable_collection_targets_get(
         None
     };
 
-    let preview_items = db
-        .query(
+    let preview_items = if let Some(user) = user {
+        db.query(
+            "SELECT collection_target_item.id, collection_target_item.ap_id, object_type, name, url, attributed_to, content_html, summary_html, image_url, published,
+                collection_target_item_like.local,
+                collection_target_item_like.federation_sent_at IS NOT NULL,
+                collection_target_item_like.federation_received_at IS NOT NULL,
+                collection_target_item_like.federation_posted_at IS NOT NULL
+            FROM collection_target_item
+            LEFT OUTER JOIN collection_target_item_like
+                ON collection_target_item_like.item=collection_target_item.id
+                AND collection_target_item_like.person=$2
+            WHERE collection_target=$1
+            ORDER BY published DESC NULLS LAST, collection_target_item.id DESC
+            LIMIT 12",
+            &[&collection_target, &user],
+        )
+        .await?
+        .into_iter()
+        .map(|row| {
+            let published: Option<chrono::DateTime<chrono::FixedOffset>> = row.get(9);
+            let vote_local: Option<bool> = row.get(10);
+            let your_vote = vote_local.map(|vote_local| RespYourVoteInfo {
+                federation_status: local_remote_federation_status(
+                    vote_local,
+                    false,
+                    row.get(13),
+                    row.get(11),
+                    row.get(12),
+                ),
+            });
+
+            serde_json::json!({
+                "id": row.get::<_, i64>(0),
+                "ap_id": row.get::<_, String>(1),
+                "type": row.get::<_, Option<String>>(2),
+                "name": row.get::<_, String>(3),
+                "url": row.get::<_, Option<String>>(4),
+                "attributed_to": row.get::<_, Option<String>>(5),
+                "content_html": clean_source_html_owned(row.get::<_, Option<String>>(6)),
+                "summary_html": clean_source_html_owned(row.get::<_, Option<String>>(7)),
+                "image_url": row.get::<_, Option<String>>(8),
+                "published": published.map(|value| value.to_rfc3339()),
+                "your_vote": your_vote,
+            })
+        })
+        .collect::<Vec<_>>()
+    } else {
+        db.query(
             "SELECT id, ap_id, object_type, name, url, attributed_to, content_html, summary_html, image_url, published
             FROM collection_target_item
             WHERE collection_target=$1
@@ -2647,18 +3327,19 @@ async fn route_unstable_collection_targets_get(
                 "name": row.get::<_, String>(3),
                 "url": row.get::<_, Option<String>>(4),
                 "attributed_to": row.get::<_, Option<String>>(5),
-                "content_html": row.get::<_, Option<String>>(6),
-                "summary_html": row.get::<_, Option<String>>(7),
+                "content_html": clean_source_html_owned(row.get::<_, Option<String>>(6)),
+                "summary_html": clean_source_html_owned(row.get::<_, Option<String>>(7)),
                 "image_url": row.get::<_, Option<String>>(8),
                 "published": published.map(|value| value.to_rfc3339()),
             })
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+    };
 
     let body = serde_json::json!({
         "id": CollectionTargetLocalID(row.get(0)),
         "type": row.get::<_, &str>(2),
-        "software": row.get::<_, Option<&str>>(3),
+        "software": software,
         "name": row.get::<_, &str>(1),
         "remote_url": row.get::<_, &str>(4),
         "owner": {
@@ -2668,16 +3349,563 @@ async fn route_unstable_collection_targets_get(
         "followers": row.get::<_, Option<&str>>(7),
         "first_page": row.get::<_, Option<&str>>(8),
         "last_page": row.get::<_, Option<&str>>(9),
-        "summary_html": row.get::<_, Option<&str>>(10),
+        "summary_html": row.get::<_, Option<&str>>(10).map(clean_source_html),
         "total_items": row.get::<_, Option<i64>>(11),
         "created_local": row.get::<_, chrono::DateTime<chrono::FixedOffset>>(12).to_rfc3339(),
         "updated_at": row.get::<_, chrono::DateTime<chrono::FixedOffset>>(13).to_rfc3339(),
         "your_follow": your_follow,
         "latest_unfollow_status": latest_unfollow_status,
+        "preview_item_likes_supported": preview_item_likes_supported,
         "preview_items": preview_items,
     });
 
     crate::json_response(&body)
+}
+
+fn collection_target_item_likes_supported(software: Option<&str>) -> bool {
+    /*
+        Postmarks accepts follows and comments, but its inbox does not accept
+        Like or Undo-Like activities. Treat that as a platform capability so
+        users are not invited to send activities the remote will reject.
+    */
+    !matches!(software, Some("postmarks"))
+}
+
+fn collection_target_item_replies_supported(software: Option<&str>) -> bool {
+    /*
+        ActivityStreams can model replies to any object, but source platforms
+        differ sharply in whether they treat those replies as user-visible
+        comments. Keep the active reply path to software where replies are a
+        normal part of the actor/feed model.
+    */
+    matches!(
+        software,
+        Some(
+            "wordpress"
+                | "writefreely"
+                | "postmarks"
+                | "castopod"
+                | "gancio"
+                | "mobilizon"
+                | "wordpress_event_bridge"
+                | "bookwyrm"
+                | "pixelfed"
+                | "gotosocial"
+                | "misskey"
+                | "sharkey"
+                | "iceshrimp"
+                | "snac"
+                | "mitra"
+                | "wafrn"
+        )
+    )
+}
+
+async fn route_unstable_collection_target_items_get(
+    params: (CollectionTargetLocalID, CollectionTargetItemLocalID),
+    ctx: Arc<crate::RouteContext>,
+    req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (collection_target, item) = params;
+    let db = ctx.db_pool.get().await?;
+    let user = crate::authenticate(&req, &db).await?;
+    let user_param = user.map(|user| user.raw());
+
+    let row = db
+        .query_opt(
+            "SELECT collection_target_item.id, collection_target_item.ap_id,
+                collection_target_item.object_type, collection_target_item.name,
+                collection_target_item.url, collection_target_item.attributed_to,
+                collection_target_item.content_html, collection_target_item.summary_html,
+                collection_target_item.image_url, collection_target_item.published,
+                collection_target.id, collection_target.name, collection_target.target_kind,
+                collection_target.software, collection_target.ap_id,
+                collection_target.owner_actor, collection_target.owner_ap_id,
+                collection_target_item_like.local,
+                collection_target_item_like.federation_sent_at IS NOT NULL,
+                collection_target_item_like.federation_received_at IS NOT NULL,
+                collection_target_item_like.federation_posted_at IS NOT NULL,
+                COALESCE(collection_target.owner_shared_inbox, collection_target.owner_inbox)
+            FROM collection_target_item
+            INNER JOIN collection_target
+                ON collection_target.id=collection_target_item.collection_target
+            LEFT OUTER JOIN collection_target_item_like
+                ON collection_target_item_like.item=collection_target_item.id
+                AND collection_target_item_like.person=$3::bigint
+            WHERE collection_target_item.collection_target=$1
+            AND collection_target_item.id=$2",
+            &[&collection_target, &item, &user_param],
+        )
+        .await?
+        .ok_or_else(|| {
+            crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::NOT_FOUND,
+                "No such source item",
+            ))
+        })?;
+    let published: Option<chrono::DateTime<chrono::FixedOffset>> = row.get(9);
+    let vote_local: Option<bool> = row.get(17);
+    let your_vote = vote_local.map(|vote_local| RespYourVoteInfo {
+        federation_status: local_remote_federation_status(
+            vote_local,
+            false,
+            row.get(20),
+            row.get(18),
+            row.get(19),
+        ),
+    });
+    let software = row.get::<_, Option<&str>>(13);
+    let replies_supported = collection_target_item_replies_supported(software);
+    let owner_inbox_known = row.get::<_, Option<&str>>(21).is_some();
+    let comments = db
+        .query(
+            "SELECT collection_target_item_comment.id,
+                collection_target_item_comment.content_text,
+                collection_target_item_comment.content_markdown,
+                collection_target_item_comment.content_html,
+                collection_target_item_comment.created,
+                collection_target_item_comment.local,
+                collection_target_item_comment.ap_id,
+                collection_target_item_comment.federation_sent_at IS NOT NULL,
+                collection_target_item_comment.federation_received_at IS NOT NULL,
+                collection_target_item_comment.federation_posted_at IS NOT NULL,
+                collection_target_item_comment.sensitive,
+                person.id,
+                person.username,
+                person.local,
+                person.ap_id,
+                person.avatar,
+                person.is_bot
+            FROM collection_target_item_comment
+            LEFT OUTER JOIN person
+                ON person.id=collection_target_item_comment.author
+            WHERE collection_target_item_comment.item=$1
+            AND NOT collection_target_item_comment.deleted
+            ORDER BY collection_target_item_comment.created ASC, collection_target_item_comment.id ASC
+            LIMIT 100",
+            &[&item],
+        )
+        .await?
+        .into_iter()
+        .map(|row| {
+            let comment_id = CollectionTargetItemCommentLocalID(row.get(0));
+            let created: chrono::DateTime<chrono::FixedOffset> = row.get(4);
+            let local: bool = row.get(5);
+            let author_id: Option<UserLocalID> = row.get::<_, Option<i64>>(11).map(UserLocalID);
+            let author_ap_id: Option<&str> = row.get(14);
+
+            let remote_url = if local {
+                Some(String::from(
+                    crate::apub_util::LocalObjectRef::CollectionTargetItemComment(
+                        collection_target,
+                        item,
+                        comment_id,
+                    )
+                    .to_local_uri(&ctx.host_url_apub),
+                ))
+            } else {
+                row.get::<_, Option<String>>(6)
+            };
+
+            let author = author_id.zip(row.get::<_, Option<String>>(12)).map(
+                |(author_id, author_username)| {
+                    let author_local: bool = row.get(13);
+                    let author_remote_url = if author_local {
+                        Some(String::from(
+                            crate::apub_util::LocalObjectRef::User(author_id)
+                                .to_local_uri(&ctx.host_url_apub),
+                        ))
+                    } else {
+                        author_ap_id.map(ToOwned::to_owned)
+                    };
+
+                    serde_json::json!({
+                        "id": author_id,
+                        "username": author_username,
+                        "local": author_local,
+                        "host": crate::get_actor_host_or_unknown(
+                            author_local,
+                            author_ap_id,
+                            &ctx.local_hostname,
+                        ),
+                        "remote_url": author_remote_url,
+                        "avatar": row.get::<_, Option<&str>>(15).map(|url| {
+                            serde_json::json!({
+                                "url": ctx.process_avatar_href(url, author_id).into_owned()
+                            })
+                        }),
+                        "is_bot": row.get::<_, bool>(16),
+                    })
+                },
+            );
+
+            serde_json::json!({
+                "id": comment_id,
+                "remote_url": remote_url,
+                "content_text": row.get::<_, Option<String>>(1),
+                "content_markdown": row.get::<_, Option<String>>(2),
+                "content_html": row.get::<_, Option<String>>(3)
+                    .map(|html| crate::clean_html(&html, ImageHandling::Preserve)),
+                "created": created.to_rfc3339(),
+                "local": local,
+                "author": author,
+                "sensitive": row.get::<_, bool>(10),
+                "federation_status": local_remote_federation_status(
+                    local,
+                    false,
+                    row.get(9),
+                    row.get(7),
+                    row.get(8),
+                ),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let body = serde_json::json!({
+        "collection": {
+            "id": CollectionTargetLocalID(row.get(10)),
+            "type": row.get::<_, &str>(12),
+            "software": software,
+            "name": row.get::<_, &str>(11),
+            "remote_url": row.get::<_, &str>(14),
+            "owner": {
+                "id": row.get::<_, Option<i64>>(15).map(UserLocalID),
+                "remote_url": row.get::<_, Option<&str>>(16),
+            },
+            "preview_item_likes_supported": collection_target_item_likes_supported(software),
+            "preview_item_replies_supported": replies_supported,
+            "can_reply": replies_supported && owner_inbox_known && user.is_some(),
+        },
+        "item": {
+            "id": row.get::<_, i64>(0),
+            "ap_id": row.get::<_, String>(1),
+            "type": row.get::<_, Option<String>>(2),
+            "name": row.get::<_, String>(3),
+            "url": row.get::<_, Option<String>>(4),
+            "attributed_to": row.get::<_, Option<String>>(5),
+            "content_html": clean_source_reader_html_owned(row.get::<_, Option<String>>(6)),
+            "summary_html": clean_source_reader_html_owned(row.get::<_, Option<String>>(7)),
+            "image_url": row.get::<_, Option<String>>(8),
+            "published": published.map(|value| value.to_rfc3339()),
+            "your_vote": your_vote,
+        },
+        "comments": comments,
+    });
+
+    crate::json_response(&body)
+}
+
+const COLLECTION_TARGET_ITEM_VOTE_DELIVERY_TARGET_SQL: &str = "\
+SELECT collection_target_item.ap_id, collection_target_item.attributed_to, \
+collection_target.owner_ap_id, COALESCE(collection_target.owner_shared_inbox, collection_target.owner_inbox), \
+collection_target.software \
+FROM collection_target_item \
+INNER JOIN collection_target ON collection_target.id=collection_target_item.collection_target \
+WHERE collection_target_item.id=$1 \
+AND collection_target_item.collection_target=$2";
+
+async fn route_unstable_collection_target_items_comment(
+    params: (CollectionTargetLocalID, CollectionTargetItemLocalID),
+    ctx: Arc<crate::RouteContext>,
+    req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (collection_target, item) = params;
+    let lang = crate::get_lang_for_req(&req);
+    let mut db = ctx.db_pool.get().await?;
+    let user = crate::require_login(&req, &db).await?;
+
+    #[derive(Deserialize)]
+    struct SourceItemCommentCreateBody<'a> {
+        content_text: Option<Cow<'a, str>>,
+        content_markdown: Option<String>,
+        sensitive: Option<bool>,
+    }
+
+    let body = crate::read_request_body(req.into_body()).await?;
+    let body: SourceItemCommentCreateBody<'_> = serde_json::from_slice(&body)?;
+
+    let row = db
+        .query_opt(
+            COLLECTION_TARGET_ITEM_VOTE_DELIVERY_TARGET_SQL,
+            &[&item, &collection_target],
+        )
+        .await?
+        .ok_or_else(|| {
+            crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::NOT_FOUND,
+                "No such source preview item",
+            ))
+        })?;
+
+    let software = row.get::<_, Option<&str>>(4);
+    if !collection_target_item_replies_supported(software) {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::CONFLICT,
+            "This source does not accept replies.",
+        )));
+    }
+
+    let owner_inbox = row
+        .get::<_, Option<&str>>(3)
+        .ok_or_else(|| {
+            crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::CONFLICT,
+                "The source owner inbox is not known yet.",
+            ))
+        })?
+        .to_owned();
+
+    let (content_text, content_markdown, content_html, _mentions) =
+        process_comment_content(&lang, body.content_text, body.content_markdown, &ctx).await?;
+    let sensitive = body.sensitive.unwrap_or(false);
+
+    let (comment_id, created) = {
+        let trans = db.transaction().await?;
+        let row = trans
+            .query_one(
+                "INSERT INTO collection_target_item_comment
+                    (item, author, local, content_text, content_markdown, content_html, sensitive)
+                VALUES ($1, $2, TRUE, $3, $4, $5, $6)
+                RETURNING id, created",
+                &[
+                    &item,
+                    &user,
+                    &content_text,
+                    &content_markdown,
+                    &content_html,
+                    &sensitive,
+                ],
+            )
+            .await?;
+        let comment_id = CollectionTargetItemCommentLocalID(row.get(0));
+        let created = row.get(1);
+        let comment_ap_id = crate::apub_util::LocalObjectRef::CollectionTargetItemComment(
+            collection_target,
+            item,
+            comment_id,
+        )
+        .to_local_uri(&ctx.host_url_apub)
+        .to_string();
+
+        trans
+            .execute(
+                "UPDATE collection_target_item_comment SET ap_id=$1 WHERE id=$2",
+                &[&comment_ap_id, &comment_id],
+            )
+            .await?;
+        trans.commit().await?;
+
+        (comment_id, created)
+    };
+
+    let item_ap_id: String = row.get(0);
+    let attributed_to: Option<String> = row.get(1);
+    let owner_ap_id: Option<String> = row.get(2);
+    let content_text = content_text.map(|value| value.into_owned());
+
+    crate::spawn_task(async move {
+        let item_ap_id = item_ap_id.parse()?;
+        let create = crate::apub_util::local_collection_target_item_comment_to_create_ap(
+            collection_target,
+            item,
+            comment_id,
+            &item_ap_id,
+            owner_ap_id.as_deref().map(str::parse).transpose()?,
+            attributed_to.as_deref().map(str::parse).transpose()?,
+            user,
+            created,
+            content_text.as_deref(),
+            content_markdown.as_deref(),
+            content_html.as_deref(),
+            sensitive,
+            &ctx,
+        )?;
+
+        ctx.enqueue_task(&crate::tasks::DeliverToInbox {
+            inbox: Cow::Owned(owner_inbox.parse()?),
+            sign_as: Some(ActorLocalRef::Person(user)),
+            object: serde_json::to_string(&create)?.into(),
+        })
+        .await?;
+
+        Ok(())
+    });
+
+    crate::json_response(&serde_json::json!({ "id": comment_id }))
+}
+
+async fn route_unstable_collection_target_items_like(
+    params: (CollectionTargetLocalID, CollectionTargetItemLocalID),
+    ctx: Arc<crate::RouteContext>,
+    req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (collection_target, item) = params;
+    let db = ctx.db_pool.get().await?;
+    let user = crate::require_login(&req, &db).await?;
+
+    let row = db
+        .query_opt(
+            COLLECTION_TARGET_ITEM_VOTE_DELIVERY_TARGET_SQL,
+            &[&item, &collection_target],
+        )
+        .await?
+        .ok_or_else(|| {
+            crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::NOT_FOUND,
+                "No such source preview item",
+            ))
+        })?;
+
+    if !collection_target_item_likes_supported(row.get(4)) {
+        return Err(crate::Error::UserError(crate::simple_response(
+            hyper::StatusCode::CONFLICT,
+            "This source does not accept likes.",
+        )));
+    }
+
+    let owner_inbox = row
+        .get::<_, Option<&str>>(3)
+        .ok_or_else(|| {
+            crate::Error::UserError(crate::simple_response(
+                hyper::StatusCode::CONFLICT,
+                "The source owner inbox is not known yet.",
+            ))
+        })?
+        .to_owned();
+    let item_ap_id: String = row.get(0);
+    let attributed_to: Option<String> = row.get(1);
+    let owner_ap_id: Option<String> = row.get(2);
+    let like_ap_id = crate::apub_util::fresh_local_collection_target_item_like_ap_id(
+        collection_target,
+        item,
+        user,
+        &ctx.host_url_apub,
+    )?;
+    let like_ap_id_text = like_ap_id.to_string();
+
+    let row_count = db
+        .execute(
+            "INSERT INTO collection_target_item_like (item, person, local, ap_id) VALUES ($1, $2, TRUE, $3) ON CONFLICT (item, person) DO NOTHING",
+            &[&item, &user, &like_ap_id_text],
+        )
+        .await?;
+
+    if row_count > 0 {
+        crate::spawn_task(async move {
+            let like = crate::apub_util::local_collection_target_item_like_to_ap(
+                collection_target,
+                item,
+                item_ap_id.parse()?,
+                Some(like_ap_id),
+                owner_ap_id.as_deref().map(str::parse).transpose()?,
+                attributed_to.as_deref().map(str::parse).transpose()?,
+                user,
+                &ctx.host_url_apub,
+            )?;
+
+            ctx.enqueue_task(&crate::tasks::DeliverToInbox {
+                inbox: Cow::Owned(owner_inbox.parse()?),
+                sign_as: Some(ActorLocalRef::Person(user)),
+                object: serde_json::to_string(&like)?.into(),
+            })
+            .await?;
+
+            Ok(())
+        });
+    }
+
+    Ok(crate::empty_response())
+}
+
+async fn route_unstable_collection_target_items_unlike(
+    params: (CollectionTargetLocalID, CollectionTargetItemLocalID),
+    ctx: Arc<crate::RouteContext>,
+    req: hyper::Request<hyper::Body>,
+) -> Result<hyper::Response<hyper::Body>, crate::Error> {
+    let (collection_target, item) = params;
+    let mut db = ctx.db_pool.get().await?;
+    let user = crate::require_login(&req, &db).await?;
+
+    let new_undo = {
+        let trans = db.transaction().await?;
+        let deleted_like = trans
+            .query_opt(
+                "DELETE FROM collection_target_item_like WHERE item=$1 AND person=$2 AND EXISTS (SELECT 1 FROM collection_target_item WHERE id=$1 AND collection_target=$3) RETURNING ap_id",
+                &[&item, &user, &collection_target],
+            )
+            .await?;
+
+        let new_undo = if let Some(deleted_like) = deleted_like {
+            let like_ap_id: Option<String> = deleted_like.get(0);
+            let id = uuid::Uuid::new_v4();
+
+            trans
+                .execute(
+                    "INSERT INTO local_collection_target_item_like_undo (id, item, person, like_ap_id) VALUES ($1, $2, $3, $4)",
+                    &[&id, &item, &user, &like_ap_id],
+                )
+                .await?;
+
+            Some((id, like_ap_id))
+        } else {
+            None
+        };
+
+        trans.commit().await?;
+
+        new_undo
+    };
+
+    if let Some((new_undo, like_ap_id)) = new_undo {
+        let row = db
+            .query_one(
+                COLLECTION_TARGET_ITEM_VOTE_DELIVERY_TARGET_SQL,
+                &[&item, &collection_target],
+            )
+            .await?;
+        let item_ap_id: String = row.get(0);
+        let attributed_to: Option<String> = row.get(1);
+        let owner_ap_id: Option<String> = row.get(2);
+        let likes_supported = collection_target_item_likes_supported(row.get(4));
+        let owner_inbox = row
+            .get::<_, Option<&str>>(3)
+            .ok_or_else(|| {
+                crate::Error::UserError(crate::simple_response(
+                    hyper::StatusCode::CONFLICT,
+                    "The source owner inbox is not known yet.",
+                ))
+            })?
+            .to_owned();
+
+        if !likes_supported {
+            return Ok(crate::empty_response());
+        }
+
+        crate::spawn_task(async move {
+            let undo = crate::apub_util::local_collection_target_item_like_undo_to_ap(
+                new_undo,
+                collection_target,
+                item,
+                item_ap_id.parse()?,
+                like_ap_id.as_deref().map(str::parse).transpose()?,
+                owner_ap_id.as_deref().map(str::parse).transpose()?,
+                attributed_to.as_deref().map(str::parse).transpose()?,
+                user,
+                &ctx.host_url_apub,
+            )?;
+
+            ctx.enqueue_task(&crate::tasks::DeliverToInbox {
+                inbox: Cow::Owned(owner_inbox.parse()?),
+                sign_as: Some(ActorLocalRef::Person(user)),
+                object: serde_json::to_string(&undo)?.into(),
+            })
+            .await?;
+
+            Ok(())
+        });
+    }
+
+    Ok(crate::empty_response())
 }
 
 async fn route_unstable_collection_targets_follow(
@@ -3698,6 +4926,123 @@ mod tests {
     }
 
     #[test]
+    fn collection_target_everything_scope_filters_dead_or_suppressed_sources() {
+        let sql = super::COLLECTION_TARGET_EVERYTHING_SCOPE_VISIBILITY_SQL;
+
+        assert!(sql.contains("blocked_ap_id"));
+        assert!(sql.contains("community_discovery_server"));
+        assert!(sql.contains("suppressed_reason IS NOT NULL"));
+        assert!(sql.contains("OR NOT community_discovery_server.active"));
+        assert!(sql.contains("preview_stats.preview_item_count"));
+        assert!(sql.contains("collection_target_follow"));
+    }
+
+    #[test]
+    fn collection_target_where_builder_preserves_keyword_spacing() {
+        let mut where_sql = String::from(" WHERE TRUE ");
+
+        where_sql.push_str(super::COLLECTION_TARGET_EVERYTHING_SCOPE_VISIBILITY_SQL);
+
+        assert!(!where_sql.contains("TRUEAND"));
+        assert!(where_sql.contains("TRUE AND NOT EXISTS"));
+    }
+
+    #[test]
+    fn collection_target_list_query_preserves_from_spacing() {
+        let mut sql = String::from("SELECT latest_preview.url");
+
+        sql.push(' ');
+        sql.push_str(super::COLLECTION_TARGET_LIST_FROM_SQL);
+
+        assert!(!sql.contains("urlFROM"));
+        assert!(sql.contains("url FROM collection_target"));
+    }
+
+    #[test]
+    fn source_summary_excerpt_strips_html_and_decodes_entities() {
+        let excerpt = super::source_summary_excerpt(Some(
+            "<p>I love <a href=\"https://example/tags/minimalism\">#minimalism</a> &amp; \
+             <span onclick=\"bad()\">&quot;flowers&quot;</span>.</p>",
+        ))
+        .unwrap();
+
+        assert_eq!(excerpt, "I love #minimalism & \"flowers\".");
+    }
+
+    #[test]
+    fn source_summary_excerpt_truncates_long_profiles() {
+        let long_text = "a".repeat(super::SOURCE_SUMMARY_EXCERPT_MAX_CHARS + 1);
+        let excerpt = super::source_summary_excerpt(Some(&long_text)).unwrap();
+
+        assert_eq!(
+            excerpt.len(),
+            super::SOURCE_SUMMARY_EXCERPT_MAX_CHARS + "...".len()
+        );
+        assert!(excerpt.ends_with("..."));
+    }
+
+    #[test]
+    fn openapi_covers_hitide_consumed_extension_routes() {
+        let spec: serde_json::Value =
+            serde_json::from_str(include_str!("../../../openapi/openapi.json")).unwrap();
+        let paths = spec["paths"].as_object().unwrap();
+
+        for path in [
+            "/api/unstable/objects:lookup/{remoteID}",
+            "/api/unstable/objects:blocks/{remoteID}",
+            "/api/unstable/communities/unfollow_inactive",
+            "/api/unstable/collection_targets",
+            "/api/unstable/collection_targets/{collectionTargetID}",
+            "/api/unstable/collection_targets/{collectionTargetID}/items/{itemID}",
+            "/api/unstable/collection_targets/{collectionTargetID}/items/{itemID}/your_vote",
+            "/api/unstable/collection_targets/{collectionTargetID}/follow",
+            "/api/unstable/collection_targets/{collectionTargetID}/unfollow",
+            "/api/unstable/instance/federation",
+            "/api/unstable/instance/federation/tasks/{taskID}/retry",
+            "/api/unstable/instance/stylesheet",
+            "/api/unstable/users/~me/messages",
+            "/api/unstable/users/~me/messages:dismiss",
+            "/api/stable/instance/logo",
+            "/api/stable/instance/stylesheet",
+            "/api/stable/users/{userID}/avatar/href",
+        ] {
+            assert!(
+                paths.contains_key(path),
+                "OpenAPI is missing Hitide-consumed route {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn collection_target_software_filter_normalizes_special_targets() {
+        assert_eq!(
+            super::normalize_collection_target_software_filter(Some("funkwhale_library")).unwrap(),
+            Some("funkwhale")
+        );
+        assert_eq!(
+            super::normalize_collection_target_software_filter(Some("fedigroup")).unwrap(),
+            Some("fedigroups")
+        );
+        assert_eq!(
+            super::normalize_collection_target_software_filter(Some("writefreely")).unwrap(),
+            Some("writefreely")
+        );
+        assert_eq!(
+            super::normalize_collection_target_software_filter(Some("castopod")).unwrap(),
+            Some("castopod")
+        );
+        assert_eq!(
+            super::normalize_collection_target_software_filter(Some("gotosocial")).unwrap(),
+            Some("gotosocial")
+        );
+        assert_eq!(
+            super::normalize_collection_target_software_filter(Some("all")).unwrap(),
+            None
+        );
+        assert!(super::normalize_collection_target_software_filter(Some("bad")).is_err());
+    }
+
+    #[test]
     fn new_post_sort_stays_on_created_id_ordering() {
         let sql = super::SortType::New.post_sort_sql();
 
@@ -3976,5 +5321,33 @@ mod tests {
             super::admin_failure_category(None, Some("manual suppression"), None),
             Some("suppressed")
         );
+    }
+
+    #[test]
+    fn collection_target_item_like_capability_tracks_platform_support() {
+        assert!(!super::collection_target_item_likes_supported(Some(
+            "postmarks"
+        )));
+        assert!(super::collection_target_item_likes_supported(Some(
+            "writefreely"
+        )));
+        assert!(super::collection_target_item_likes_supported(None));
+    }
+
+    #[test]
+    fn collection_target_item_reply_capability_tracks_platform_support() {
+        assert!(super::collection_target_item_replies_supported(Some(
+            "wordpress"
+        )));
+        assert!(super::collection_target_item_replies_supported(Some(
+            "pixelfed"
+        )));
+        assert!(!super::collection_target_item_replies_supported(Some(
+            "funkwhale"
+        )));
+        assert!(!super::collection_target_item_replies_supported(Some(
+            "owncast"
+        )));
+        assert!(!super::collection_target_item_replies_supported(None));
     }
 }
